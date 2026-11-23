@@ -1,0 +1,428 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="space-y-6">
+
+    <!-- Weighment Entry Form Card (Crisp White Card with Slate Border) -->
+    <div class="bg-white rounded-3xl shadow-sm border-2 border-slate-200 p-5 sm:p-8">
+
+        <form id="weighForm" onsubmit="handleSaveWeighClick(); return false;">
+            <input type="hidden" id="formOpenTicketId" name="open_ticket_id" value="">
+            <input type="hidden" id="formCurrentWeight" name="current_weight" value="0">
+            <input type="hidden" id="formFirstWeight" name="first_weight" value="">
+            <input type="hidden" id="formStage" name="stage" value="FIRST_WEIGHT">
+
+            <!-- Weighment Mode Toggle & AI Auto-Pilot Bar -->
+            <div class="mb-7 flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-slate-200">
+                <div class="flex flex-wrap items-center gap-3">
+                    <label class="text-sm sm:text-base font-extrabold text-slate-800">Mode / முறை:</label>
+                    <div class="inline-flex rounded-xl p-1 bg-slate-100 border border-slate-300">
+                        <button type="button" id="btnModeDouble" onclick="toggleWeighMode('double')"
+                                class="px-4 sm:px-5 py-2 rounded-lg text-xs sm:text-sm font-black transition bg-blue-600 text-white shadow-sm">
+                            Double Mode / இரட்டை
+                        </button>
+                        <button type="button" id="btnModeSingle" onclick="toggleWeighMode('single')"
+                                class="px-4 sm:px-5 py-2 rounded-lg text-xs sm:text-sm font-bold text-slate-600 hover:text-slate-900 transition">
+                            Single Mode / ஒற்றை
+                        </button>
+                    </div>
+
+                    <!-- AI Auto-Pilot Zero-Click Toggle -->
+                    <button type="button" id="btnAutoPilotToggle" onclick="toggleAutoPilotMode()"
+                            title="When ON, system automatically triggers Dual-Camera AI ANPR when vehicle is parked stably!"
+                            class="px-3 py-2 rounded-xl text-xs sm:text-sm font-black border transition flex items-center gap-2 bg-slate-100 border-slate-300 text-slate-700 hover:bg-slate-200 shadow-xs">
+                        <span class="w-2.5 h-2.5 rounded-full bg-slate-400" id="autoPilotLed"></span>
+                        <span>🤖 AI Auto-Pilot: <strong id="autoPilotStatusText">OFF</strong></span>
+                    </button>
+                </div>
+
+                <!-- Stored Tare Badge (Shown if vehicle has past tare) -->
+                <div id="storedTareBox" class="hidden text-xs bg-emerald-50 text-emerald-800 border-2 border-emerald-300 rounded-xl px-3.5 py-1.5 font-bold flex items-center gap-2 shadow-xs">
+                    <span class="text-base">📦</span>
+                    <span>Last Tare / காலி எடை: <span id="storedTareVal" class="font-mono text-sm font-black text-emerald-950">0</span> kg</span>
+                    <span id="storedTareDate" class="text-[11px] text-emerald-700 font-semibold">(--)</span>
+                </div>
+            </div>
+
+            <!-- Form Grid: High-Visibility Inputs -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 sm:gap-6">
+
+                <!-- Serial Number (Ticket No) -->
+                <div class="field-group">
+                    <label for="serial_no_display" class="block text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 mb-1.5 transition-colors">
+                        Serial No / எண்
+                    </label>
+                    <div class="relative">
+                        <span class="absolute left-4 top-3.5 text-slate-400 font-black text-xl">#</span>
+                        <input type="text" id="serial_no_display" readonly value="{{ next_ticket_no }}"
+                               class="w-full text-xl sm:text-2xl font-black font-mono pl-10 pr-4 py-3 sm:py-3.5 rounded-2xl border-2 border-slate-300 bg-slate-100 text-slate-800 shadow-xs cursor-not-allowed select-none outline-none">
+                    </div>
+                </div>
+
+                <!-- Vehicle Number (REQUIRED) -->
+                <div class="relative field-group">
+                    <div class="flex items-center justify-between mb-1.5">
+                        <label for="vehicle_no" class="block text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 transition-colors">
+                            Vehicle No / வண்டி எண் <span class="text-rose-500">*</span>
+                        </label>
+                        <div class="flex items-center gap-1.5 flex-wrap justify-end">
+                            <button type="button" onclick="startVoiceRecognition()"
+                                    title="Speak vehicle number"
+                                    class="px-2.5 py-1 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 hover:opacity-95 text-white text-xs font-black flex items-center gap-1 shadow-xs transition active:scale-95">
+                                <span>🎙️</span>
+                                <span>Voice</span>
+                            </button>
+                            <button type="button" onclick="runGeminiFusionANPR()" id="btnGeminiFusion"
+                                    title="Dual-Camera AI Fusion: Plate, Vehicle Class & Cargo"
+                                    class="px-2.5 py-1 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 hover:opacity-95 text-white text-xs font-black flex items-center gap-1 shadow-xs transition active:scale-95">
+                                <span>✨</span>
+                                <span id="geminiFusionBtnText">Dual AI Fusion</span>
+                            </button>
+                            <label for="vehiclePhotoUpload" title="Upload vehicle photo to scan"
+                                   class="px-2 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1 cursor-pointer transition border border-slate-300">
+                                <span>📁</span>
+                                <input type="file" id="vehiclePhotoUpload" accept="image/*" class="hidden" onchange="handlePhotoUpload(event)">
+                            </label>
+                        </div>
+                    </div>
+                    <div class="relative">
+                        <input type="text" id="vehicle_no" name="vehicle_no" required autofocus autocomplete="off"
+                               placeholder="e.g. TN33AB1234"
+                               oninput="handleVehicleInput(this.value)"
+                               onblur="lookupVehicleDetails(this.value)"
+                               class="w-full text-xl sm:text-2xl font-black uppercase tracking-wider px-4 py-3 sm:py-3.5 rounded-2xl border-2 border-slate-400 bg-white shadow-xs font-mono transition-all outline-none">
+                        <span class="absolute right-4 top-4 text-slate-400 font-mono text-xs font-bold">TN-IND</span>
+                    </div>
+
+                    <!-- Gemini AI Detection Feedback Banner -->
+                    <div id="geminiScanFeedback" class="hidden mt-2 p-2 rounded-xl text-xs font-bold border flex items-center justify-between"></div>
+                </div>
+
+                <!-- Customer Name (Optional) -->
+                <div class="field-group">
+                    <label for="customer_name" class="block text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 mb-1.5 transition-colors">
+                        Customer Name / வாடிக்கையாளர் பெயர் <span class="text-xs font-normal text-slate-400">(Optional)</span>
+                    </label>
+                    <input type="text" id="customer_name" name="customer_name" placeholder="Leave blank or Customer name"
+                           class="w-full text-base sm:text-lg font-bold px-4 py-3 sm:py-3.5 rounded-2xl border-2 border-slate-400 bg-white shadow-xs transition-all outline-none">
+                </div>
+
+                <!-- Mobile Number -->
+                <div class="field-group">
+                    <label for="mobile" class="block text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 mb-1.5 transition-colors">
+                        Mobile Number / அலைபேசி எண்
+                    </label>
+                    <input type="tel" id="mobile" name="mobile" maxlength="10" placeholder="10-digit mobile number"
+                           class="w-full text-base sm:text-lg font-bold font-mono px-4 py-3 sm:py-3.5 rounded-2xl border-2 border-slate-400 bg-white shadow-xs transition-all outline-none">
+                </div>
+
+                <!-- Vehicle Type with Icons -->
+                <div class="field-group">
+                    <label for="vehicle_type" class="block text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 mb-1.5 transition-colors">
+                        Vehicle Type / வண்டி வகை
+                    </label>
+                    <select id="vehicle_type" name="vehicle_type" onchange="updateTariffByVehicleAndLoad()"
+                            class="w-full text-base sm:text-lg font-bold px-4 py-3 sm:py-3.5 rounded-2xl border-2 border-slate-400 bg-white shadow-xs cursor-pointer transition-all outline-none">
+                        {% for vt in vehicle_types %}
+                        <option value="{{ vt }}" {% if loop.first %}selected{% endif %}>{{ vt }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Load Condition: Loaded vs Empty -->
+                <div>
+                    <label class="block text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 mb-1.5">
+                        Load Condition / நிலை
+                    </label>
+                    <div class="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-2xl border-2 border-slate-400 h-[52px] sm:h-[54px] items-center shadow-xs">
+                        <button type="button" id="lblLoadLoaded" onclick="setLoadCondition('Loaded / லோடு')"
+                                class="cursor-pointer flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-xl text-xs sm:text-sm font-black transition bg-emerald-600 text-white shadow select-none">
+                            <span>📦</span>
+                            <span>Loaded / லோடு</span>
+                        </button>
+                        <button type="button" id="lblLoadEmpty" onclick="setLoadCondition('Empty / காலி')"
+                                class="cursor-pointer flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-xl text-xs sm:text-sm font-bold transition text-slate-700 hover:bg-slate-200 select-none">
+                            <span>⚪</span>
+                            <span>Empty / காலி</span>
+                        </button>
+                        <input type="hidden" id="loadStatusInput" name="load_status" value="Loaded / லோடு">
+                    </div>
+                </div>
+
+                <!-- Material Dropdown -->
+                <div class="field-group">
+                    <div class="flex items-center justify-between mb-1.5">
+                        <label for="material" class="block text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 transition-colors">
+                            Material / சரக்கு
+                        </label>
+                        <span id="materialEmptyHint" class="hidden text-[10px] font-bold text-amber-800 bg-amber-50 px-2 py-0.5 rounded border border-amber-300">
+                            🚫 Empty (Blank)
+                        </span>
+                    </div>
+                    <select id="material" name="material"
+                            class="w-full text-base sm:text-lg font-bold px-4 py-3 sm:py-3.5 rounded-2xl border-2 border-slate-400 bg-white shadow-xs cursor-pointer transition-all outline-none">
+                        {% for m in materials %}
+                        <option value="{{ m }}">{{ m }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Fee / Charge (₹) -->
+                <div class="field-group">
+                    <label for="charge" class="block text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 mb-1.5 transition-colors">
+                        Charge / கட்டணம் (₹)
+                    </label>
+                    <div class="relative">
+                        <span class="absolute left-4 top-3.5 text-slate-500 font-black text-xl">₹</span>
+                        <input type="number" step="10" id="charge" name="charge" value="{{ default_charge or 100.0 }}"
+                               class="w-full text-xl sm:text-2xl font-black font-mono pl-10 pr-4 py-3 sm:py-3.5 rounded-2xl border-2 border-slate-400 bg-white shadow-xs transition-all outline-none">
+                    </div>
+                </div>
+
+                <!-- Print Copies Selector -->
+                <div class="field-group">
+                    <label for="copies" class="block text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 mb-1.5 transition-colors">
+                        Print Copies / பிரதிகள்
+                    </label>
+                    <select id="copies" name="copies"
+                            class="w-full text-base sm:text-lg font-bold px-4 py-3 sm:py-3.5 rounded-2xl border-2 border-slate-400 bg-white shadow-xs cursor-pointer transition-all outline-none">
+                        <option value="1" selected>1 Copy (Standard)</option>
+                        <option value="2">2 Copies (Party + Office)</option>
+                        <option value="3">3 Copies (Party + Office + Driver)</option>
+                    </select>
+                </div>
+
+                <!-- Manual Tare Input (Visible only in Single Weighment mode) -->
+                <div id="manualTareGroup" class="hidden field-group">
+                    <label for="manual_tare" class="block text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 mb-1.5 transition-colors">
+                        Tare Weight / காலி எடை (kg) <span class="text-xs font-semibold text-emerald-700">(Optional)</span>
+                    </label>
+                    <input type="number" step="10" id="manual_tare" name="manual_tare" placeholder="Enter tare weight" oninput="recalcNetWeight()"
+                           class="w-full text-lg sm:text-xl font-bold font-mono px-4 py-3 sm:py-3.5 rounded-2xl border-2 border-slate-400 bg-white shadow-xs transition-all outline-none">
+                </div>
+
+                <!-- 1st Weight Unified Field (Visible only during 2nd weight) -->
+                <div id="firstWeightFieldContainer" class="hidden field-group">
+                    <div class="flex items-center justify-between mb-1.5">
+                        <div class="flex items-center gap-2">
+                            <label class="block text-xs sm:text-sm font-black uppercase tracking-wider text-amber-900">
+                                1st Weight / 1-ம் எடை
+                            </label>
+                            <span id="firstWeightLoadBadge" class="text-[10px] font-black px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-300 uppercase">
+                                📦 LOADED
+                            </span>
+                        </div>
+                        <button type="button" onclick="startFreshTicket()" title="Cancel 2nd weight and start fresh ticket"
+                                class="px-2.5 py-1 bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 rounded-lg text-xs font-black transition flex items-center gap-1 cursor-pointer">
+                            <span>🔄</span>
+                            <span>New Weight</span>
+                        </button>
+                    </div>
+                    <div class="relative">
+                        <input type="text" id="firstWeightDisplayInput" readonly value="-- Kg"
+                               class="w-full h-[52px] sm:h-[54px] px-4 rounded-2xl border-2 border-amber-400 bg-amber-50/80 font-mono font-black text-2xl sm:text-3xl text-amber-950 tracking-wider cursor-not-allowed select-none shadow-xs outline-none">
+                    </div>
+                    <div class="mt-1.5 flex items-center justify-between text-xs text-slate-500 font-semibold">
+                        <span id="firstWeightTimestamp">Recorded: --</span>
+                    </div>
+                </div>
+
+                <!-- Live Scale Weight (Real-Time Display) -->
+                <div id="liveScaleFieldContainer">
+                    <div class="flex items-center justify-between mb-1.5">
+                        <label class="block text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 truncate">
+                            Live Scale / நேரடி எடை (Kg)
+                        </label>
+                        <span id="liveScaleBadge" class="text-xs font-black px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 flex items-center gap-1.5 shrink-0">
+                            <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                            <span id="liveScaleStatusText">STABLE</span>
+                        </span>
+                    </div>
+                    <div class="relative">
+                        <input type="text" id="liveScaleInput" readonly value="0 Kg"
+                               class="w-full h-[52px] sm:h-[54px] px-4 rounded-2xl border-2 border-emerald-500 bg-emerald-50/80 font-mono font-black text-2xl sm:text-3xl text-emerald-900 tracking-wider cursor-not-allowed select-none shadow-xs ring-2 ring-emerald-100 outline-none">
+                    </div>
+                    <div class="mt-1.5 flex items-center justify-between text-xs font-bold">
+                        <span id="scaleStageBadge" class="text-xs font-black px-2.5 py-0.5 rounded-lg bg-blue-100 text-blue-800 uppercase tracking-wide border border-blue-200">
+                            1st WEIGHT / 1-ம் எடை
+                        </span>
+                        <span class="text-[11px] font-semibold text-slate-500 font-mono" id="scaleRawIndicator">RS-232 Connected</span>
+                    </div>
+                </div>
+
+                <!-- Net Weight Field (Visible when 2nd weight or single tare is active) -->
+                <div id="netWeightFieldContainer" class="hidden field-group">
+                    <div class="flex items-center justify-between mb-1.5">
+                        <label class="block text-xs sm:text-sm font-black uppercase tracking-wider text-indigo-950">
+                            Net Weight / சரக்கு எடை (Kg)
+                        </label>
+                        <span class="text-xs font-black px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800">
+                            CALCULATED
+                        </span>
+                    </div>
+                    <div class="relative">
+                        <input type="text" id="netWeightDisplayInput" readonly value="0 Kg"
+                               class="w-full h-[52px] sm:h-[54px] px-4 rounded-2xl border-2 border-indigo-400 bg-indigo-50/80 font-mono font-black text-2xl sm:text-3xl text-indigo-950 tracking-wider cursor-not-allowed select-none shadow-xs ring-2 ring-indigo-100 outline-none">
+                    </div>
+                    <div class="mt-1.5 text-xs text-indigo-800 font-semibold truncate">
+                        <span>Net = | Live Weight - Tare / 1st Weight |</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- On-Demand Dual Camera Cards (Zero Idle CPU) -->
+            <div class="mt-8 pt-6 border-t border-slate-200">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="text-xs font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                        <i class="fa-solid fa-camera text-blue-600"></i>
+                        <span>On-Demand Camera Feeds (Front & Rear)</span>
+                    </span>
+                    <button type="button" onclick="refreshCameraPreviews()" class="text-xs text-blue-600 hover:text-blue-800 font-bold flex items-center gap-1">
+                        <i class="fa-solid fa-rotate"></i> Refresh Feeds
+                    </button>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div class="bg-slate-900 rounded-2xl border-2 border-slate-300 overflow-hidden relative aspect-video flex items-center justify-center shadow-inner">
+                        <img id="frontCameraImg" src="/api/camera-snapshot?camera=front" alt="Front Camera" class="w-full h-full object-contain">
+                        <span class="absolute top-2 left-2 bg-slate-900/80 backdrop-blur-sm px-2 py-0.5 rounded text-[11px] text-white font-mono font-bold border border-slate-700">
+                            CAM 01 &bull; FRONT
+                        </span>
+                    </div>
+                    <div class="bg-slate-900 rounded-2xl border-2 border-slate-300 overflow-hidden relative aspect-video flex items-center justify-center shadow-inner">
+                        <img id="rearCameraImg" src="/api/camera-snapshot?camera=rear" alt="Rear Camera" class="w-full h-full object-contain">
+                        <span class="absolute top-2 left-2 bg-slate-900/80 backdrop-blur-sm px-2 py-0.5 rounded text-[11px] text-white font-mono font-bold border border-slate-700">
+                            CAM 02 &bull; REAR
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Action Button Row -->
+            <div class="mt-8 pt-6 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-5">
+                
+                <!-- Moving Warning Prompt -->
+                <div id="movingWarningPrompt" class="hidden text-sm sm:text-base font-black text-amber-700 flex items-center gap-2">
+                    <span class="animate-spin text-amber-600 text-lg">⏳</span>
+                    <span>Waiting for scale to stabilize... / எடை நிலைப்படும் வரை காத்திருக்கவும்</span>
+                </div>
+
+                <!-- Giant Save Button -->
+                <button type="button" id="btnSaveWeigh" onclick="handleSaveWeighClick()"
+                        class="w-full sm:w-auto px-10 py-4 sm:py-5 rounded-2xl text-xl sm:text-2xl font-black text-white bg-emerald-600 hover:bg-emerald-700 active:scale-98 shadow-xl transition flex items-center justify-center gap-3 cursor-pointer">
+                    <span>🖨️</span>
+                    <span id="btnSaveText">Save & Print to Epson L3350</span>
+                </button>
+
+            </div>
+
+        </form>
+
+    </div>
+
+</div>
+
+<!-- Pre-Print Camera Snapshot Verification Modal -->
+<div id="confirmSaveModal" class="hidden fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5 overflow-y-auto" onclick="if(event.target === this) closeConfirmModal();">
+    <div class="bg-white rounded-3xl shadow-2xl max-w-2xl w-full p-5 sm:p-6 space-y-4 animate-scale-in border-2 border-slate-200 my-auto">
+        
+        <!-- Modal Header -->
+        <div class="flex items-center justify-between pb-3 border-b border-slate-200">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center text-xl font-black">
+                    📸
+                </div>
+                <div>
+                    <h3 class="text-base sm:text-lg font-black text-slate-900">Pre-Print Verification & Camera Review</h3>
+                    <p class="text-xs text-slate-500 font-medium">Verify camera snapshots and ticket details before physical printing.</p>
+                </div>
+            </div>
+            <button type="button" onclick="closeConfirmModal()" class="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition">
+                <i class="fa-solid fa-xmark text-lg"></i>
+            </button>
+        </div>
+
+        <!-- Camera Snapshots Row -->
+        <div class="space-y-2">
+            <div class="flex items-center justify-between">
+                <span class="text-xs font-black uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
+                    <span>📹</span>
+                    <span>Live Camera Snapshots</span>
+                </span>
+                <span class="text-[11px] font-bold text-slate-500 flex items-center gap-1">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span>Captured on-demand</span>
+                </span>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div class="bg-slate-950 rounded-xl border border-slate-700 overflow-hidden relative shadow-inner min-h-[160px] flex items-center justify-center">
+                    <span class="absolute top-2 left-2 z-10 bg-slate-900/80 px-2 py-0.5 rounded text-[10px] font-mono font-bold text-white">
+                        FRONT VIEW (CAM 01)
+                    </span>
+                    <img id="confirmFrontImg" alt="Front Camera" class="w-auto h-auto max-h-[180px] max-w-full object-contain mx-auto">
+                </div>
+                <div class="bg-slate-950 rounded-xl border border-slate-700 overflow-hidden relative shadow-inner min-h-[160px] flex items-center justify-center">
+                    <span class="absolute top-2 left-2 z-10 bg-slate-900/80 px-2 py-0.5 rounded text-[10px] font-mono font-bold text-white">
+                        REAR VIEW (CAM 02)
+                    </span>
+                    <img id="confirmRearImg" alt="Rear Camera" class="w-auto h-auto max-h-[180px] max-w-full object-contain mx-auto">
+                </div>
+            </div>
+        </div>
+
+        <!-- Ticket Summary Preview Table -->
+        <div class="overflow-x-auto rounded-xl border-2 border-slate-300 bg-white shadow-xs">
+            <table class="w-full text-xs text-left border-collapse">
+                <tbody class="divide-y divide-slate-200">
+                    <tr class="divide-x divide-slate-200 bg-slate-50">
+                        <td class="p-2.5 font-bold text-slate-600 w-1/4">Vehicle No / எண்</td>
+                        <td class="p-2.5 font-black text-blue-900 font-mono text-sm tracking-wider w-1/4" id="confirmVehNo">--</td>
+                        <td class="p-2.5 font-bold text-slate-600 w-1/4">Scale Weight / எடை</td>
+                        <td class="p-2.5 font-black text-emerald-700 font-mono text-sm w-1/4" id="confirmWeight">-- KG</td>
+                    </tr>
+                    <tr class="divide-x divide-slate-200">
+                        <td class="p-2.5 font-bold text-slate-600">Vehicle Type / வாகனம்</td>
+                        <td class="p-2.5 font-bold text-slate-900" id="confirmVehType">--</td>
+                        <td class="p-2.5 font-bold text-slate-600">Load Condition / நிலை</td>
+                        <td class="p-2.5 font-bold text-slate-900" id="confirmLoadStatus">--</td>
+                    </tr>
+                    <tr class="divide-x divide-slate-200 bg-slate-50">
+                        <td class="p-2.5 font-bold text-slate-600">Material / சரக்கு</td>
+                        <td class="p-2.5 font-bold text-slate-900" id="confirmMaterial">--</td>
+                        <td class="p-2.5 font-bold text-slate-600">Charge / கட்டணம்</td>
+                        <td class="p-2.5 font-black text-slate-900" id="confirmCharge">₹ 100</td>
+                    </tr>
+                    <tr class="divide-x divide-slate-200">
+                        <td class="p-2.5 font-bold text-slate-600">Stage / செயல்முறை</td>
+                        <td colspan="3" class="p-2.5 font-black text-blue-800" id="confirmStage">--</td>
+                    </tr>
+                    <tr id="confirmNetRow" class="hidden divide-x divide-slate-200 bg-emerald-50 border-t-2 border-emerald-400">
+                        <td colspan="2" class="p-2.5 font-bold text-emerald-900">
+                            Calculated Net Weight / நிகர சரக்கு எடை:
+                        </td>
+                        <td colspan="2" class="p-2.5 text-right font-black font-mono text-base text-emerald-800" id="confirmNetWeight">
+                            -- KG
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-3 border-t border-slate-200">
+            <button type="button" onclick="closeConfirmModal()"
+                    class="w-full sm:w-auto px-5 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-bold text-xs hover:bg-slate-100 transition flex items-center justify-center gap-1.5 cursor-pointer">
+                <span>✏️</span>
+                <span>Change Values / Edit</span>
+            </button>
+            <button type="button" id="btnConfirmSubmit" onclick="doConfirmSubmit()"
+                    class="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-black text-xs shadow-lg flex items-center justify-center gap-2 transition cursor-pointer">
+                <span>🖨️</span>
+                <span id="confirmBtnLabel">Confirm & Print to Epson L3350</span>
+            </button>
+        </div>
+
+    </div>
+</div>
+{% endblock %}
