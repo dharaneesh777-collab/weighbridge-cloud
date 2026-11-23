@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: weighbridge-cloud
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    region: singapore
+    envVars:
+      - key: TAILSCALE_AUTHKEY
+        sync: false
+      - key: TAILSCALE_HOSTNAME
+        value: render-weighbridge
+      - key: EDGE_URL
+        value: http://100.101.78.57:8000
+      - key: GEMINI_API_KEY
+        sync: false
