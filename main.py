@@ -106,6 +106,19 @@ def tailscale_status():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+@app.get("/api/tailscale-up")
+def do_tailscale_up(key: Optional[str] = None):
+    import subprocess
+    authkey = key or os.getenv("TAILSCALE_AUTHKEY", "")
+    try:
+        cmd = ["tailscale", "up", f"--authkey={authkey}", "--hostname=render-weighbridge", "--accept-routes", "--reset"]
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=15).decode()
+        return {"status": "success", "output": out}
+    except subprocess.CalledProcessError as e:
+        return {"status": "error", "output": e.output.decode() if e.output else str(e)}
+    except Exception as e:
+        return {"status": "exception", "error": str(e)}
+
 @app.get("/", response_class=HTMLResponse)
 async def index_page(request: Request, session: Session = Depends(get_cloud_session)):
     next_no = get_next_cloud_ticket_number(session)
