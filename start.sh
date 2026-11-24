@@ -1,33 +1,30 @@
 #!/bin/bash
-set -e
 
-echo "=== Starting Tailscale on Render ==="
+echo "=== Starting Weighbridge Cloud on Render ==="
 
-# Start tailscaled in userspace networking mode
+# Start tailscaled in userspace networking mode with in-memory state
 /usr/sbin/tailscaled \
-  --state=/var/lib/tailscale/tailscaled.state \
-  --socket=/var/run/tailscale/tailscaled.sock \
+  --state=mem: \
   --tun=userspace-networking \
   --outbound-http-proxy-listen=localhost:1055 \
-  --socks5-server=localhost:1055 &
+  --socks5-server=localhost:1055 >/var/log/tailscaled.log 2>&1 &
 
-# Wait for tailscaled socket to appear
-until /usr/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock status >/dev/null 2>&1 || [ "$RETRIES" -gt 20 ]; do
-  sleep 0.5
-  RETRIES=$((RETRIES+1))
-done
-
-# Connect to Tailscale if AUTHKEY provided
+# Asynchronously authenticate Tailscale so Uvicorn is never blocked
 if [ -n "$TAILSCALE_AUTHKEY" ]; then
-  echo "Authenticating Tailscale..."
-  /usr/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock up \
-    --authkey="${TAILSCALE_AUTHKEY}" \
-    --hostname="${TAILSCALE_HOSTNAME:-render-weighbridge}" \
-    --accept-routes
-  echo "Tailscale connected successfully!"
-  /usr/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock status
-else
-  echo "WARNING: TAILSCALE_AUTHKEY not set. Tailscale will not connect."
+  (
+    echo "Connecting to Tailscale..."
+    for i in $(seq 1 30); do
+      if /usr/bin/tailscale status >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.5
+    done
+    /usr/bin/tailscale up \
+      --authkey="${TAILSCALE_AUTHKEY}" \
+      --hostname="${TAILSCALE_HOSTNAME:-render-weighbridge}" \
+      --accept-routes || true
+    echo "Tailscale up completed."
+  ) &
 fi
 
 # Export proxy environment variables so Python httpx/requests automatically routes to Tailscale IPs
@@ -39,5 +36,5 @@ export NO_PROXY="localhost,127.0.0.1"
 # Set default Edge URL to Home PC Tailscale IP if not overridden
 export EDGE_URL="${EDGE_URL:-http://100.101.78.57:8000}"
 
-echo "=== Starting Weighbridge Cloud App on Port ${PORT:-10000} ==="
+echo "=== Launching Uvicorn on Port ${PORT:-10000} ==="
 exec uvicorn main:app --host 0.0.0.0 --port "${PORT:-10000}"
