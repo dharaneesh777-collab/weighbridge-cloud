@@ -22,6 +22,7 @@ if [ -n "$TAILSCALE_AUTHKEY" ]; then
     /usr/bin/tailscale up \
       --authkey="${TAILSCALE_AUTHKEY}" \
       --hostname="${TAILSCALE_HOSTNAME:-render-weighbridge}" \
+      --ephemeral \
       --accept-routes || true
     echo "Tailscale up completed."
   ) &
