@@ -1,5 +1,10 @@
 import os
 import time
+import asyncio
+import subprocess
+import base64
+import urllib.request
+import json
 from datetime import datetime
 from typing import Optional, List
 from contextlib import asynccontextmanager
@@ -34,13 +39,78 @@ except ImportError:
     from edge_client import edge_client
     from gemini_cloud import gemini_cloud
 
+def sync_tailscale_state_to_render():
+    state_file = "/var/lib/tailscale/tailscaled.state"
+    if not os.path.exists(state_file):
+        return False
+    try:
+        with open(state_file, "rb") as f:
+            raw_bytes = f.read()
+        if not raw_bytes:
+            return False
+        b64_str = base64.b64encode(raw_bytes).decode("ascii")
+        render_key = os.getenv("RENDER_API_KEY")
+        render_srv = os.getenv("RENDER_SERVICE_ID")
+        current_env = os.getenv("TS_STATE_B64", "")
+        if render_key and render_srv and (b64_str != current_env):
+            url = f"https://api.render.com/v1/services/{render_srv}/env-vars/TS_STATE_B64"
+            req = urllib.request.Request(
+                url,
+                data=json.dumps({"value": b64_str}).encode("utf-8"),
+                headers={"Authorization": f"Bearer {render_key}", "Content-Type": "application/json"},
+                method="PUT"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                print(f"[Tailscale Guardian] Synced TS_STATE_B64 to Render: HTTP {resp.status}")
+                os.environ["TS_STATE_B64"] = b64_str
+                return True
+    except Exception as e:
+        print(f"[Tailscale Guardian] State sync error: {e}")
+    return False
+
+def run_tailscale_up(force_key: Optional[str] = None):
+    authkey = force_key or os.getenv("TAILSCALE_AUTHKEY", "")
+    hostname = os.getenv("TAILSCALE_HOSTNAME", "render-weighbridge")
+    if not authkey:
+        return {"status": "error", "message": "TAILSCALE_AUTHKEY not set"}
+    try:
+        cmd = ["tailscale", "up", f"--authkey={authkey}", f"--hostname={hostname}", "--accept-routes", "--reset"]
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=20).decode()
+        sync_tailscale_state_to_render()
+        return {"status": "success", "output": out}
+    except subprocess.CalledProcessError as e:
+        return {"status": "error", "output": e.output.decode() if e.output else str(e)}
+    except Exception as e:
+        return {"status": "exception", "error": str(e)}
+
+async def tailscale_guardian_loop():
+    """Background task to ensure Tailscale stays connected and persists session node state."""
+    await asyncio.sleep(4)
+    while True:
+        try:
+            status_res = subprocess.run(["tailscale", "status"], capture_output=True, text=True, timeout=5)
+            output = (status_res.stdout or "") + (status_res.stderr or "")
+            if "Logged out" in output or status_res.returncode != 0:
+                print("[Tailscale Guardian] Detected logged out state. Reconnecting...")
+                run_tailscale_up()
+            else:
+                if not os.getenv("TS_STATE_SYNCED"):
+                    if sync_tailscale_state_to_render():
+                        os.environ["TS_STATE_SYNCED"] = "1"
+        except Exception as e:
+            print(f"[Tailscale Guardian] Loop error: {e}")
+        await asyncio.sleep(25)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
         init_cloud_db()
     except Exception as e:
         print(f"Error initializing cloud DB: {e}")
+    
+    guardian_task = asyncio.create_task(tailscale_guardian_loop())
     yield
+    guardian_task.cancel()
 
 app = FastAPI(title="Weighbridge Cloud Portal", lifespan=lifespan)
 
@@ -97,10 +167,17 @@ DEFAULT_VEHICLE_TYPES = [
 
 @app.get("/api/tailscale-status")
 def tailscale_status():
-    import subprocess
     try:
         out = subprocess.check_output(["tailscale", "status"], stderr=subprocess.STDOUT, timeout=5).decode()
-        return {"status": "ok", "output": out}
+        state_file = "/var/lib/tailscale/tailscaled.state"
+        has_state = os.path.exists(state_file)
+        has_env = bool(os.getenv("TS_STATE_B64"))
+        return {
+            "status": "ok",
+            "output": out,
+            "has_state_file": has_state,
+            "has_env_state": has_env
+        }
     except subprocess.CalledProcessError as e:
         return {"status": "cmd_error", "output": e.output.decode() if e.output else str(e)}
     except Exception as e:
@@ -108,16 +185,25 @@ def tailscale_status():
 
 @app.get("/api/tailscale-up")
 def do_tailscale_up(key: Optional[str] = None):
-    import subprocess
-    authkey = key or os.getenv("TAILSCALE_AUTHKEY", "")
-    try:
-        cmd = ["tailscale", "up", f"--authkey={authkey}", "--hostname=render-weighbridge", "--accept-routes", "--reset"]
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=15).decode()
-        return {"status": "success", "output": out}
-    except subprocess.CalledProcessError as e:
-        return {"status": "error", "output": e.output.decode() if e.output else str(e)}
-    except Exception as e:
-        return {"status": "exception", "error": str(e)}
+    return run_tailscale_up(force_key=key)
+
+@app.get("/api/tailscale-state")
+def tailscale_state_export():
+    state_file = "/var/lib/tailscale/tailscaled.state"
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "rb") as f:
+                content = f.read()
+            b64_str = base64.b64encode(content).decode("ascii")
+            return {
+                "status": "ok",
+                "size_bytes": len(content),
+                "state_b64": b64_str,
+                "env_saved": bool(os.getenv("TS_STATE_B64"))
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    return {"status": "not_found", "message": "State file does not exist yet"}
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page(request: Request, session: Session = Depends(get_cloud_session)):
