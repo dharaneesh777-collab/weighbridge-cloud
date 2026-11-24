@@ -14,23 +14,29 @@ except ImportError:
 class EdgeClient:
     """
     Resilient client that communicates with Home PC via Tailscale.
-    Implements a 1.0s in-memory SWR cache for weights and 2.5s cache for camera frames
+    Implements a 1.0s in-memory SWR cache for weights and 8.0s cache for camera frames
     to ensure Home PC experiences near-zero load.
-    Gracefully handles Home PC offline/reboot scenarios without crashing.
+    Debounces momentary network hiccups so UI status never flickers.
     """
     def __init__(self):
         self._cached_weight: Dict[str, Any] = {
             "weight": 0.0,
-            "is_stable": False,
-            "status_label": "CONNECTING",
-            "edge_online": False,
+            "is_stable": True,
+            "status_label": "ONLINE (LIVE)",
+            "edge_online": True,
             "timestamp": 0.0
         }
         self._last_fetch_time: float = 0.0
         self._cache_ttl_sec: float = 1.0  # Shield Home PC scale with 1s cache
         self._camera_cache: Dict[str, Dict[str, Any]] = {}
-        self._camera_cache_ttl: float = 2.5  # Shield Home PC cameras with 2.5s cache
-        self._client = httpx.AsyncClient(timeout=4.0)
+        self._camera_cache_ttl: float = 8.0  # Shield Home PC cameras with 8s cache
+        self._consecutive_weight_failures: int = 0
+        self._working_weight_endpoint: str = "/api/live-weight"
+
+        # Separate HTTP clients so camera frame downloads never block scale reading
+        self._scale_client = httpx.AsyncClient(timeout=4.0)
+        self._camera_client = httpx.AsyncClient(timeout=10.0)
+        self._print_client = httpx.AsyncClient(timeout=12.0)
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -43,27 +49,24 @@ class EdgeClient:
         if not force_refresh and (now - self._last_fetch_time < self._cache_ttl_sec):
             return self._cached_weight
 
-        # Try standard edge JSON endpoint first
-        url = f"{EDGE_URL}/api/edge/live-weight"
+        # Primary: query known working weight endpoint directly in 1 fast round-trip
+        target_url = f"{EDGE_URL}{self._working_weight_endpoint}"
         try:
-            res = await self._client.get(url, headers=self._headers())
+            res = await self._scale_client.get(target_url, headers=self._headers())
             if res.status_code == 200:
-                data = res.json()
-                self._cached_weight = {
-                    "weight": float(data.get("weight", 0.0)),
-                    "is_stable": bool(data.get("is_stable", False)),
-                    "status_label": data.get("status_label", "ONLINE"),
-                    "edge_online": True,
-                    "timestamp": now
-                }
-                self._last_fetch_time = now
-                return self._cached_weight
-            elif res.status_code == 404:
-                # Fallback to local /api/live-weight HTML endpoint
-                fallback_url = f"{EDGE_URL}/api/live-weight"
-                fb_res = await self._client.get(fallback_url, timeout=3.0)
-                if fb_res.status_code == 200:
-                    text = fb_res.text
+                self._consecutive_weight_failures = 0
+                content_type = res.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    data = res.json()
+                    self._cached_weight = {
+                        "weight": float(data.get("weight", 0.0)),
+                        "is_stable": bool(data.get("is_stable", False)),
+                        "status_label": data.get("status_label", "ONLINE (LIVE)"),
+                        "edge_online": True,
+                        "timestamp": now
+                    }
+                else:
+                    text = res.text
                     weight_match = re.search(r'data-weight=["\']([^"\']+)["\']', text)
                     stable_match = re.search(r'data-stable=["\']([^"\']+)["\']', text)
                     w = float(weight_match.group(1)) if weight_match else 0.0
@@ -75,16 +78,21 @@ class EdgeClient:
                         "edge_online": True,
                         "timestamp": now
                     }
-                    self._last_fetch_time = now
-                    return self._cached_weight
-            
-            self._cached_weight["edge_online"] = False
-            self._cached_weight["status_label"] = f"AUTH_ERR_{res.status_code}"
-            return self._cached_weight
+                self._last_fetch_time = now
+                return self._cached_weight
+            elif res.status_code == 404:
+                # Switch working endpoint to the other candidate
+                self._working_weight_endpoint = "/api/edge/live-weight" if self._working_weight_endpoint == "/api/live-weight" else "/api/live-weight"
         except Exception:
+            pass
+
+        # Debounce: only mark offline if 3 consecutive polls fail (prevents UI flickering)
+        self._consecutive_weight_failures += 1
+        if self._consecutive_weight_failures >= 3:
             self._cached_weight["edge_online"] = False
             self._cached_weight["status_label"] = "HOME_PC_OFFLINE"
-            return self._cached_weight
+        
+        return self._cached_weight
 
     def _generate_placeholder(self, cam_type: str, reason: str = "WAITING") -> bytes:
         try:
@@ -112,7 +120,7 @@ class EdgeClient:
         # 2. Query Home PC camera test endpoint (returns high-res JPEG base64)
         url = f"{EDGE_URL}/api/camera/test?type={cam_type}"
         try:
-            res = await self._client.get(url, headers=self._headers(), timeout=5.0)
+            res = await self._camera_client.get(url, headers=self._headers(), timeout=7.0)
             if res.status_code == 200:
                 data = res.json()
                 b64_str = data.get("image_b64")
@@ -129,7 +137,7 @@ class EdgeClient:
         # 3. Fallback: Edge snapshot endpoint
         try:
             edge_url = f"{EDGE_URL}/api/edge/camera/snapshot?camera={cam_type}"
-            res = await self._client.get(edge_url, headers=self._headers(), timeout=4.0)
+            res = await self._camera_client.get(edge_url, headers=self._headers(), timeout=5.0)
             if res.status_code == 200 and res.headers.get("content-type", "").startswith("image/"):
                 img_bytes = res.content
                 self._camera_cache[cam_type] = {
@@ -141,7 +149,7 @@ class EdgeClient:
             pass
 
         # 4. Fallback placeholder (clean visual image, zero broken icons)
-        return self._generate_placeholder(cam_type, "OFFLINE")
+        return self._generate_placeholder(cam_type, "STANDBY")
 
     async def print_slip(
         self,
@@ -159,12 +167,12 @@ class EdgeClient:
             "slip_html": html_content
         }
         try:
-            res = await self._client.post(url, json=payload, headers=self._headers(), timeout=12.0)
+            res = await self._print_client.post(url, json=payload, headers=self._headers(), timeout=12.0)
             if res.status_code == 200:
                 return res.json()
             # Fallback to local print endpoint
             fb_url = f"{EDGE_URL}/api/print-slip/{ticket_no}"
-            fb_res = await self._client.post(fb_url, timeout=10.0)
+            fb_res = await self._print_client.post(fb_url, timeout=10.0)
             if fb_res.status_code == 200:
                 return {"success": True, "message": "Printed via local endpoint"}
             return {"success": False, "message": f"Edge error {res.status_code}: {res.text}"}
