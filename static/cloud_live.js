@@ -558,4 +558,12 @@ async function doConfirmSubmit() {
 // Initialize on page load
 window.addEventListener('DOMContentLoaded', () => {
     pollLiveWeight();
+    refreshCameraPreviews();
+
+    // Auto-refresh camera snapshots every 4 seconds only when tab is active (zero idle load on Home PC)
+    setInterval(() => {
+        if (!document.hidden) {
+            refreshCameraPreviews();
+        }
+    }, 4000);
 });
