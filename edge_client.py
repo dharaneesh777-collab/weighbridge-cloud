@@ -91,6 +91,16 @@ class EdgeClient:
         if self._consecutive_weight_failures >= 3:
             self._cached_weight["edge_online"] = False
             self._cached_weight["status_label"] = "HOME_PC_OFFLINE"
+            # Trigger self-healing if logged out
+            if self._consecutive_weight_failures % 5 == 0:
+                try:
+                    import subprocess
+                    chk = subprocess.run(["tailscale", "status"], capture_output=True, text=True, timeout=2)
+                    if "Logged out" in chk.stdout or chk.returncode != 0:
+                        from main import run_tailscale_up
+                        run_tailscale_up()
+                except Exception:
+                    pass
         
         return self._cached_weight
 
@@ -148,7 +158,12 @@ class EdgeClient:
         except Exception:
             pass
 
-        # 4. Fallback placeholder (clean visual image, zero broken icons)
+        # 4. Fallback to existing cached frame (up to 120s) to prevent black standby during network glitches
+        if cam_type in self._camera_cache and self._camera_cache[cam_type].get("bytes"):
+            if now - self._camera_cache[cam_type].get("timestamp", 0) < 120.0:
+                return self._camera_cache[cam_type]["bytes"]
+
+        # 5. Fallback placeholder (clean visual image, zero broken icons)
         return self._generate_placeholder(cam_type, "STANDBY")
 
     async def print_slip(
