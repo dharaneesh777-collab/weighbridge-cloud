@@ -95,6 +95,17 @@ DEFAULT_VEHICLE_TYPES = [
 
 # ---------------- Frontend Web Pages ----------------
 
+@app.get("/api/tailscale-status")
+def tailscale_status():
+    import subprocess
+    try:
+        out = subprocess.check_output(["tailscale", "status"], stderr=subprocess.STDOUT, timeout=5).decode()
+        return {"status": "ok", "output": out}
+    except subprocess.CalledProcessError as e:
+        return {"status": "cmd_error", "output": e.output.decode() if e.output else str(e)}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 @app.get("/", response_class=HTMLResponse)
 async def index_page(request: Request, session: Session = Depends(get_cloud_session)):
     next_no = get_next_cloud_ticket_number(session)
