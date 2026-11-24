@@ -68,13 +68,15 @@ def sync_tailscale_state_to_render():
         print(f"[Tailscale Guardian] State sync error: {e}")
     return False
 
-def run_tailscale_up(force_key: Optional[str] = None):
+def run_tailscale_up(force_key: Optional[str] = None, reset: bool = False):
     authkey = force_key or os.getenv("TAILSCALE_AUTHKEY", "")
     hostname = os.getenv("TAILSCALE_HOSTNAME", "render-weighbridge")
     if not authkey:
         return {"status": "error", "message": "TAILSCALE_AUTHKEY not set"}
     try:
-        cmd = ["tailscale", "up", f"--authkey={authkey}", f"--hostname={hostname}", "--accept-routes", "--reset"]
+        cmd = ["tailscale", "up", f"--authkey={authkey}", f"--hostname={hostname}", "--accept-routes"]
+        if reset or not os.path.exists("/var/lib/tailscale/tailscaled.state"):
+            cmd.append("--reset")
         out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=20).decode()
         sync_tailscale_state_to_render()
         return {"status": "success", "output": out}
@@ -85,21 +87,26 @@ def run_tailscale_up(force_key: Optional[str] = None):
 
 async def tailscale_guardian_loop():
     """Background task to ensure Tailscale stays connected and persists session node state."""
-    await asyncio.sleep(4)
+    await asyncio.sleep(15)  # Allow container to settle and load persistent session
+    logged_out_consecutive = 0
     while True:
         try:
             status_res = subprocess.run(["tailscale", "status"], capture_output=True, text=True, timeout=5)
             output = (status_res.stdout or "") + (status_res.stderr or "")
             if "Logged out" in output or status_res.returncode != 0:
-                print("[Tailscale Guardian] Detected logged out state. Reconnecting...")
-                run_tailscale_up()
+                logged_out_consecutive += 1
+                if logged_out_consecutive >= 3:
+                    print("[Tailscale Guardian] Tailscale logged out for 3 checks. Reconnecting...")
+                    run_tailscale_up(reset=False)
+                    logged_out_consecutive = 0
             else:
+                logged_out_consecutive = 0
                 if not os.getenv("TS_STATE_SYNCED"):
                     if sync_tailscale_state_to_render():
                         os.environ["TS_STATE_SYNCED"] = "1"
         except Exception as e:
             print(f"[Tailscale Guardian] Loop error: {e}")
-        await asyncio.sleep(25)
+        await asyncio.sleep(30)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
