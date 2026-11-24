@@ -1,7 +1,10 @@
 import time
 import re
+import base64
+import io
 from typing import Dict, Any, Optional
 import httpx
+from PIL import Image, ImageDraw
 
 try:
     from cloud_app.config import EDGE_URL, EDGE_KEY
@@ -11,9 +14,9 @@ except ImportError:
 class EdgeClient:
     """
     Resilient client that communicates with Home PC via Tailscale.
-    Implements a 1.0s in-memory SWR cache to ensure Home PC experiences near-zero load.
+    Implements a 1.0s in-memory SWR cache for weights and 2.5s cache for camera frames
+    to ensure Home PC experiences near-zero load.
     Gracefully handles Home PC offline/reboot scenarios without crashing.
-    Supports both /api/edge/ and legacy /api/ endpoints.
     """
     def __init__(self):
         self._cached_weight: Dict[str, Any] = {
@@ -24,8 +27,10 @@ class EdgeClient:
             "timestamp": 0.0
         }
         self._last_fetch_time: float = 0.0
-        self._cache_ttl_sec: float = 1.0  # Shield Home PC with 1s cache
-        self._client = httpx.AsyncClient(timeout=3.5)
+        self._cache_ttl_sec: float = 1.0  # Shield Home PC scale with 1s cache
+        self._camera_cache: Dict[str, Dict[str, Any]] = {}
+        self._camera_cache_ttl: float = 2.5  # Shield Home PC cameras with 2.5s cache
+        self._client = httpx.AsyncClient(timeout=4.0)
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -81,20 +86,62 @@ class EdgeClient:
             self._cached_weight["status_label"] = "HOME_PC_OFFLINE"
             return self._cached_weight
 
+    def _generate_placeholder(self, cam_type: str, reason: str = "WAITING") -> bytes:
+        try:
+            img = Image.new("RGB", (640, 360), color=(15, 23, 42))
+            draw = ImageDraw.Draw(img)
+            draw.rectangle([(20, 20), (620, 340)], outline=(51, 65, 85), width=2)
+            label = f"CAM {cam_type.upper()} · {reason}"
+            draw.text((230, 170), label, fill=(148, 163, 184))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=80)
+            return buf.getvalue()
+        except Exception:
+            return b""
+
     async def get_camera_snapshot(self, camera: str = "front") -> Optional[bytes]:
-        # Try edge snapshot first, fallback to camera preview
-        urls = [
-            f"{EDGE_URL}/api/edge/camera/snapshot?camera={camera}",
-            f"{EDGE_URL}/api/camera/preview?camera={camera}"
-        ]
-        for url in urls:
-            try:
-                res = await self._client.get(url, headers=self._headers(), timeout=5.0)
-                if res.status_code == 200 and len(res.content) > 100:
-                    return res.content
-            except Exception:
-                continue
-        return None
+        cam_type = "front" if camera in ("front", "both") else "rear"
+        now = time.time()
+
+        # 1. Check in-memory cache to guarantee ZERO extra load on Home PC
+        if cam_type in self._camera_cache:
+            entry = self._camera_cache[cam_type]
+            if now - entry["timestamp"] < self._camera_cache_ttl:
+                return entry["bytes"]
+
+        # 2. Query Home PC camera test endpoint (returns high-res JPEG base64)
+        url = f"{EDGE_URL}/api/camera/test?type={cam_type}"
+        try:
+            res = await self._client.get(url, headers=self._headers(), timeout=5.0)
+            if res.status_code == 200:
+                data = res.json()
+                b64_str = data.get("image_b64")
+                if b64_str:
+                    img_bytes = base64.b64decode(b64_str)
+                    self._camera_cache[cam_type] = {
+                        "bytes": img_bytes,
+                        "timestamp": now
+                    }
+                    return img_bytes
+        except Exception:
+            pass
+
+        # 3. Fallback: Edge snapshot endpoint
+        try:
+            edge_url = f"{EDGE_URL}/api/edge/camera/snapshot?camera={cam_type}"
+            res = await self._client.get(edge_url, headers=self._headers(), timeout=4.0)
+            if res.status_code == 200 and res.headers.get("content-type", "").startswith("image/"):
+                img_bytes = res.content
+                self._camera_cache[cam_type] = {
+                    "bytes": img_bytes,
+                    "timestamp": now
+                }
+                return img_bytes
+        except Exception:
+            pass
+
+        # 4. Fallback placeholder (clean visual image, zero broken icons)
+        return self._generate_placeholder(cam_type, "OFFLINE")
 
     async def print_slip(
         self,
