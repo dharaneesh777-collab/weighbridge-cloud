@@ -8,6 +8,8 @@ let currentStage = '1ST_WEIGHT'; // '1ST_WEIGHT' | '2ND_WEIGHT'
 let firstWeightVal = 0;
 let autoPilotEnabled = false;
 let autoPilotTriggered = false;
+let livePollFailures = 0;
+let isRefreshingCameras = false;
 
 // Tariff Table (Tamil Nadu Weighbridge standard rates)
 const TARIFF_RATES = {
@@ -69,13 +71,17 @@ async function pollLiveWeight() {
         const edgeText = document.getElementById('edgeStatusText');
         if (edgeDot && edgeText) {
             if (data.edge_online) {
+                livePollFailures = 0;
                 edgeDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500';
                 edgeText.textContent = 'Home PC Edge: Online (Tailscale)';
                 edgeText.className = 'text-emerald-800 font-bold';
             } else {
-                edgeDot.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
-                edgeText.textContent = 'Home PC: Reconnecting...';
-                edgeText.className = 'text-amber-800 font-bold';
+                livePollFailures++;
+                if (livePollFailures >= 3) {
+                    edgeDot.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
+                    edgeText.textContent = 'Home PC: Reconnecting...';
+                    edgeText.className = 'text-amber-800 font-bold';
+                }
             }
         }
 
@@ -322,13 +328,38 @@ function recalcNetWeight() {
     }
 }
 
-// Refresh Camera Previews
-function refreshCameraPreviews() {
+// Refresh Camera Previews (Preload smoothly in background with zero flicker)
+async function refreshCameraPreviews() {
+    if (isRefreshingCameras) return;
+    isRefreshingCameras = true;
+
+    const btn = document.getElementById('btnRefreshFeeds');
+    if (btn) btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1 text-blue-600"></i> Refreshing...';
+
     const t = Date.now();
     const front = document.getElementById('frontCameraImg');
     const rear = document.getElementById('rearCameraImg');
-    if (front) front.src = `/api/camera-snapshot?camera=front&t=${t}`;
-    if (rear) rear.src = `/api/camera-snapshot?camera=rear&t=${t}`;
+
+    const loadImg = (imgEl, url) => {
+        return new Promise((resolve) => {
+            if (!imgEl) return resolve();
+            const temp = new Image();
+            temp.onload = () => {
+                imgEl.src = temp.src;
+                resolve();
+            };
+            temp.onerror = () => resolve();
+            temp.src = url;
+        });
+    };
+
+    await Promise.all([
+        loadImg(front, `/api/camera-snapshot?camera=front&t=${t}`),
+        loadImg(rear, `/api/camera-snapshot?camera=rear&t=${t}`)
+    ]);
+
+    if (btn) btn.innerHTML = '<i class="fa-solid fa-arrows-rotate mr-1 text-blue-600"></i> Refresh Feeds';
+    isRefreshingCameras = false;
 }
 
 // Gemini Dual-Camera Fusion ANPR
@@ -559,11 +590,4 @@ async function doConfirmSubmit() {
 window.addEventListener('DOMContentLoaded', () => {
     pollLiveWeight();
     refreshCameraPreviews();
-
-    // Auto-refresh camera snapshots every 4 seconds only when tab is active (zero idle load on Home PC)
-    setInterval(() => {
-        if (!document.hidden) {
-            refreshCameraPreviews();
-        }
-    }, 4000);
 });
