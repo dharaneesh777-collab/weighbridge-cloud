@@ -105,7 +105,7 @@ class GeminiCloudService:
         }
 
         # Model fallback chain
-        models = [GEMINI_MODEL, "gemini-flash-latest", "gemini-1.5-flash"]
+        models = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
         async with httpx.AsyncClient(timeout=10.0) as client:
             for model_name in models:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
