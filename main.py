@@ -27,6 +27,7 @@ try:
         init_cloud_db, get_cloud_session, CloudTicket,
         get_next_cloud_ticket_number
     )
+    from cloud_app.firestore_db import firestore_store
     from cloud_app.edge_client import edge_client
     from cloud_app.gemini_cloud import gemini_cloud
 except ImportError:
@@ -39,6 +40,7 @@ except ImportError:
         init_cloud_db, get_cloud_session, CloudTicket,
         get_next_cloud_ticket_number
     )
+    from firestore_db import firestore_store
     from edge_client import edge_client
     from gemini_cloud import gemini_cloud
 
@@ -127,7 +129,12 @@ async def tailscale_guardian_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
-        init_cloud_db()
+        if firestore_store.is_enabled():
+            await asyncio.to_thread(firestore_store.init_db)
+            print("[DB] Connected to Google Cloud Firestore")
+        else:
+            init_cloud_db()
+            print("[DB] Connected to SQL database")
     except Exception as e:
         print(f"Error initializing cloud DB: {e}")
     
@@ -232,7 +239,10 @@ async def do_tailscale_up(
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page(request: Request, session: Session = Depends(get_cloud_session)):
-    next_no = get_next_cloud_ticket_number(session)
+    if firestore_store.is_enabled():
+        next_no = await asyncio.to_thread(firestore_store.get_next_ticket_number)
+    else:
+        next_no = get_next_cloud_ticket_number(session)
     return templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -251,8 +261,11 @@ async def index_page(request: Request, session: Session = Depends(get_cloud_sess
 
 @app.get("/tickets", response_class=HTMLResponse)
 async def tickets_page(request: Request, session: Session = Depends(get_cloud_session)):
-    statement = select(CloudTicket).order_by(desc(CloudTicket.id)).limit(100)
-    tickets = session.exec(statement).all()
+    if firestore_store.is_enabled():
+        tickets = await asyncio.to_thread(firestore_store.list_tickets, 100)
+    else:
+        statement = select(CloudTicket).order_by(desc(CloudTicket.id)).limit(100)
+        tickets = session.exec(statement).all()
     return templates.TemplateResponse(
         request=request,
         name="tickets.html",
@@ -267,7 +280,10 @@ async def tickets_page(request: Request, session: Session = Depends(get_cloud_se
 
 @app.get("/slip/{ticket_id}", response_class=HTMLResponse)
 async def view_slip(request: Request, ticket_id: int, auto_print: int = 0, session: Session = Depends(get_cloud_session)):
-    ticket = session.get(CloudTicket, ticket_id)
+    if firestore_store.is_enabled():
+        ticket = await asyncio.to_thread(firestore_store.get_ticket_by_id, ticket_id)
+    else:
+        ticket = session.get(CloudTicket, ticket_id)
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return templates.TemplateResponse(
@@ -340,11 +356,14 @@ async def api_vehicle_lookup(v: str = Query("", min_length=2), session: Session 
         return {"found": False, "has_open": False}
 
     # 1. Check if there is an active open 1st-weight ticket in Cloud
-    open_ticket = session.exec(
-        select(CloudTicket)
-        .where(CloudTicket.vehicle_no == clean_v, CloudTicket.status == "FIRST_WEIGHT")
-        .order_by(desc(CloudTicket.id))
-    ).first()
+    if firestore_store.is_enabled():
+        open_ticket = await asyncio.to_thread(firestore_store.find_open_first_weight, clean_v)
+    else:
+        open_ticket = session.exec(
+            select(CloudTicket)
+            .where(CloudTicket.vehicle_no == clean_v, CloudTicket.status == "FIRST_WEIGHT")
+            .order_by(desc(CloudTicket.id))
+        ).first()
 
     if open_ticket:
         fw_val = open_ticket.first_weight or (open_ticket.gross_weight if open_ticket.gross_weight > 0 else open_ticket.tare_weight)
@@ -365,11 +384,14 @@ async def api_vehicle_lookup(v: str = Query("", min_length=2), session: Session 
         }
 
     # 2. Check for past completed tickets to retrieve stored tare
-    past_ticket = session.exec(
-        select(CloudTicket)
-        .where(CloudTicket.vehicle_no == clean_v)
-        .order_by(desc(CloudTicket.id))
-    ).first()
+    if firestore_store.is_enabled():
+        past_ticket = await asyncio.to_thread(firestore_store.find_latest_by_vehicle, clean_v)
+    else:
+        past_ticket = session.exec(
+            select(CloudTicket)
+            .where(CloudTicket.vehicle_no == clean_v)
+            .order_by(desc(CloudTicket.id))
+        ).first()
 
     if past_ticket:
         tare_val = past_ticket.tare_weight if past_ticket.tare_weight > 0 else None
@@ -398,63 +420,107 @@ async def api_ticket_save_and_print(
     3. Sends print payload to Home PC to physically print to Epson L3350.
     """
     clean_v = req.vehicle_no.upper().replace(" ", "").replace("-", "").strip()
-
-    # If completing an open first weight ticket:
-    existing_open = session.exec(
-        select(CloudTicket)
-        .where(CloudTicket.vehicle_no == clean_v, CloudTicket.status == "FIRST_WEIGHT")
-        .order_by(desc(CloudTicket.id))
-    ).first()
-
     is_stage_first = (req.stage == "FIRST_WEIGHT")
+    now_utc = datetime.now(timezone.utc)
 
-    if existing_open and not is_stage_first:
-        ticket = existing_open
-        ticket.customer_name = req.customer_name.strip()
-        ticket.mobile = req.mobile.strip()
-        ticket.vehicle_type = req.vehicle_type
-        ticket.load_status = req.load_status
-        ticket.material = req.material.strip()
-        ticket.gross_weight = req.gross_weight
-        ticket.tare_weight = req.tare_weight
-        ticket.net_weight = req.net_weight
-        ticket.charge = req.charge
-        ticket.status = "COMPLETED"
-        ticket.second_weight_at = datetime.now(timezone.utc)
-        session.commit()
-        session.refresh(ticket)
-    else:
-        ticket = None
-        for _ in range(3):
-            next_ticket_no = get_next_cloud_ticket_number(session)
-            now_utc = datetime.now(timezone.utc)
-            candidate = CloudTicket(
-                ticket_no=next_ticket_no,
-                vehicle_no=clean_v,
-                customer_name=req.customer_name.strip(),
-                mobile=req.mobile.strip(),
-                vehicle_type=req.vehicle_type,
-                load_status=req.load_status,
-                material=req.material.strip(),
-                gross_weight=req.gross_weight,
-                tare_weight=req.tare_weight,
-                net_weight=req.net_weight,
-                first_weight=req.first_weight if is_stage_first else None,
-                charge=req.charge,
-                status="FIRST_WEIGHT" if is_stage_first else "COMPLETED",
-                first_weight_at=now_utc if is_stage_first else None,
-                second_weight_at=now_utc if not is_stage_first else None
+    if firestore_store.is_enabled():
+        existing_open = await asyncio.to_thread(firestore_store.find_open_first_weight, clean_v)
+        if existing_open and not is_stage_first:
+            ticket = await asyncio.to_thread(
+                firestore_store.update_ticket,
+                existing_open.ticket_no,
+                {
+                    "customer_name": req.customer_name.strip(),
+                    "mobile": req.mobile.strip(),
+                    "vehicle_type": req.vehicle_type,
+                    "load_status": req.load_status,
+                    "material": req.material.strip(),
+                    "gross_weight": req.gross_weight,
+                    "tare_weight": req.tare_weight,
+                    "net_weight": req.net_weight,
+                    "charge": req.charge,
+                    "status": "COMPLETED",
+                    "second_weight_at": now_utc,
+                }
             )
-            session.add(candidate)
-            try:
-                session.commit()
-                session.refresh(candidate)
-                ticket = candidate
-                break
-            except IntegrityError:
-                session.rollback()
-        if not ticket:
-            raise HTTPException(status_code=409, detail="Concurrent ticket number conflict; please retry.")
+        else:
+            ticket = await asyncio.to_thread(
+                firestore_store.create_ticket,
+                {
+                    "vehicle_no": clean_v,
+                    "customer_name": req.customer_name.strip(),
+                    "mobile": req.mobile.strip(),
+                    "vehicle_type": req.vehicle_type,
+                    "load_status": req.load_status,
+                    "material": req.material.strip(),
+                    "gross_weight": req.gross_weight,
+                    "tare_weight": req.tare_weight,
+                    "net_weight": req.net_weight,
+                    "first_weight": req.first_weight if is_stage_first else None,
+                    "charge": req.charge,
+                    "status": "FIRST_WEIGHT" if is_stage_first else "COMPLETED",
+                    "created_at": now_utc,
+                    "first_weight_at": now_utc if is_stage_first else None,
+                    "second_weight_at": now_utc if not is_stage_first else None,
+                    "printed": False,
+                    "printed_at": None,
+                    "remarks": "",
+                }
+            )
+    else:
+        # If completing an open first weight ticket:
+        existing_open = session.exec(
+            select(CloudTicket)
+            .where(CloudTicket.vehicle_no == clean_v, CloudTicket.status == "FIRST_WEIGHT")
+            .order_by(desc(CloudTicket.id))
+        ).first()
+
+        if existing_open and not is_stage_first:
+            ticket = existing_open
+            ticket.customer_name = req.customer_name.strip()
+            ticket.mobile = req.mobile.strip()
+            ticket.vehicle_type = req.vehicle_type
+            ticket.load_status = req.load_status
+            ticket.material = req.material.strip()
+            ticket.gross_weight = req.gross_weight
+            ticket.tare_weight = req.tare_weight
+            ticket.net_weight = req.net_weight
+            ticket.charge = req.charge
+            ticket.status = "COMPLETED"
+            ticket.second_weight_at = now_utc
+            session.commit()
+            session.refresh(ticket)
+        else:
+            ticket = None
+            for _ in range(3):
+                next_ticket_no = get_next_cloud_ticket_number(session)
+                candidate = CloudTicket(
+                    ticket_no=next_ticket_no,
+                    vehicle_no=clean_v,
+                    customer_name=req.customer_name.strip(),
+                    mobile=req.mobile.strip(),
+                    vehicle_type=req.vehicle_type,
+                    load_status=req.load_status,
+                    material=req.material.strip(),
+                    gross_weight=req.gross_weight,
+                    tare_weight=req.tare_weight,
+                    net_weight=req.net_weight,
+                    first_weight=req.first_weight if is_stage_first else None,
+                    charge=req.charge,
+                    status="FIRST_WEIGHT" if is_stage_first else "COMPLETED",
+                    first_weight_at=now_utc if is_stage_first else None,
+                    second_weight_at=now_utc if not is_stage_first else None
+                )
+                session.add(candidate)
+                try:
+                    session.commit()
+                    session.refresh(candidate)
+                    ticket = candidate
+                    break
+                except IntegrityError:
+                    session.rollback()
+            if not ticket:
+                raise HTTPException(status_code=409, detail="Concurrent ticket number conflict; please retry.")
 
     # 2. Render slip HTML
     slip_html = templates.get_template("slip.html").render({
@@ -473,24 +539,38 @@ async def api_ticket_save_and_print(
         copies=req.copies
     )
 
-    ticket.printed = print_res.get("success", False)
-    if ticket.printed:
-        ticket.printed_at = datetime.now(timezone.utc)
-    session.add(ticket)
-    session.commit()
+    is_printed = print_res.get("success", False)
+    if firestore_store.is_enabled():
+        await asyncio.to_thread(
+            firestore_store.update_ticket,
+            ticket.ticket_no,
+            {
+                "printed": is_printed,
+                "printed_at": datetime.now(timezone.utc) if is_printed else None,
+            }
+        )
+    else:
+        ticket.printed = is_printed
+        if ticket.printed:
+            ticket.printed_at = datetime.now(timezone.utc)
+        session.add(ticket)
+        session.commit()
 
     return {
         "success": True,
         "ticket_no": ticket.ticket_no,
         "status": ticket.status,
-        "print_success": bool(ticket.printed),
+        "print_success": bool(is_printed),
         "print_status": print_res.get("message", "Print dispatched to Epson L3350")
     }
 
 @app.post("/api/ticket/reprint")
 async def api_ticket_reprint(ticket_no: int, session: Session = Depends(get_cloud_session)):
-    statement = select(CloudTicket).where(CloudTicket.ticket_no == ticket_no)
-    ticket = session.exec(statement).first()
+    if firestore_store.is_enabled():
+        ticket = await asyncio.to_thread(firestore_store.get_ticket_by_id, ticket_no)
+    else:
+        statement = select(CloudTicket).where(CloudTicket.ticket_no == ticket_no)
+        ticket = session.exec(statement).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
