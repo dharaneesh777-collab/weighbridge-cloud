@@ -115,7 +115,7 @@
             </div>
             <div class="info-row">
                 <span class="info-label">DATE & TIME:</span>
-                <span>{{ ticket.created_at.strftime('%d-%m-%Y %H:%M:%S') if ticket.created_at else '' }}</span>
+                <span>{{ (ticket.second_weight_at or ticket.created_at) | ist('%d-%m-%Y %H:%M:%S') }}</span>
             </div>
             <div class="info-row">
                 <span class="info-label">VEHICLE NO:</span>

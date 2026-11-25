@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from typing import Optional, List
+from sqlalchemy import inspect, text
 from sqlmodel import SQLModel, Field, Session, create_engine, select, func
 
 try:
@@ -40,6 +41,28 @@ class CloudTicket(SQLModel, table=True):
 
 def init_cloud_db():
     SQLModel.metadata.create_all(engine)
+    # Safely add any new columns to an existing cloud_tickets table
+    try:
+        inspector = inspect(engine)
+        if "cloud_tickets" in inspector.get_table_names():
+            existing = {col["name"] for col in inspector.get_columns("cloud_tickets")}
+            migrations = {
+                "mobile": "VARCHAR DEFAULT ''",
+                "vehicle_type": "VARCHAR DEFAULT '🚚 Lorry / லாரி'",
+                "load_status": "VARCHAR DEFAULT 'Loaded / லோடு'",
+                "first_weight": "FLOAT",
+                "first_weight_at": "TIMESTAMP",
+                "second_weight_at": "TIMESTAMP",
+                "printed": "BOOLEAN DEFAULT FALSE",
+                "printed_at": "TIMESTAMP",
+                "remarks": "VARCHAR DEFAULT ''"
+            }
+            with engine.begin() as conn:
+                for col_name, col_def in migrations.items():
+                    if col_name not in existing:
+                        conn.execute(text(f"ALTER TABLE cloud_tickets ADD COLUMN {col_name} {col_def}"))
+    except Exception as e:
+        print(f"DB migration check warning: {e}")
 
 def get_cloud_session():
     with Session(engine) as session:

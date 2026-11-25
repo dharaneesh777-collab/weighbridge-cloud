@@ -38,7 +38,7 @@
                     {% for t in tickets %}
                     <tr class="hover:bg-slate-50/80 transition">
                         <td class="py-3 px-4 font-black text-blue-700">#{{ t.ticket_no }}</td>
-                        <td class="py-3 px-4 text-slate-600 font-sans font-semibold">{{ t.created_at.strftime('%d-%m-%Y %H:%M') if t.created_at else '-' }}</td>
+                        <td class="py-3 px-4 text-slate-600 font-sans font-semibold">{{ t.created_at | ist('%d-%m-%Y %H:%M') or '-' }}</td>
                         <td class="py-3 px-4 font-black text-slate-900 uppercase text-sm">{{ t.vehicle_no }}</td>
                         <td class="py-3 px-4 text-slate-700 font-sans font-medium">{{ t.customer_name or '-' }}</td>
                         <td class="py-3 px-4 text-slate-700 font-sans font-medium">{{ t.material or '-' }}</td>

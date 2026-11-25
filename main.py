@@ -5,21 +5,23 @@ import subprocess
 import base64
 import urllib.request
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Depends, HTTPException, Query, Response
+from fastapi import FastAPI, Request, Depends, HTTPException, Query, Response, UploadFile, File, Header
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, desc
 
 try:
     from cloud_app.config import (
         CLOUD_DIR, BUSINESS_NAME, BUSINESS_CAPACITY,
-        BUSINESS_ADDRESS, BUSINESS_PHONE, DEFAULT_CHARGE, DEFAULT_COPIES
+        BUSINESS_ADDRESS, BUSINESS_PHONE, DEFAULT_CHARGE, DEFAULT_COPIES,
+        ADMIN_KEY, IST
     )
     from cloud_app.db import (
         init_cloud_db, get_cloud_session, CloudTicket,
@@ -30,7 +32,8 @@ try:
 except ImportError:
     from config import (
         CLOUD_DIR, BUSINESS_NAME, BUSINESS_CAPACITY,
-        BUSINESS_ADDRESS, BUSINESS_PHONE, DEFAULT_CHARGE, DEFAULT_COPIES
+        BUSINESS_ADDRESS, BUSINESS_PHONE, DEFAULT_CHARGE, DEFAULT_COPIES,
+        ADMIN_KEY, IST
     )
     from db import (
         init_cloud_db, get_cloud_session, CloudTicket,
@@ -38,6 +41,17 @@ except ImportError:
     )
     from edge_client import edge_client
     from gemini_cloud import gemini_cloud
+
+def to_ist(dt: Optional[datetime]) -> Optional[datetime]:
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST)
+
+def format_ist(dt: Optional[datetime], fmt: str = "%d-%m-%Y %H:%M:%S") -> str:
+    ist_dt = to_ist(dt)
+    return ist_dt.strftime(fmt) if ist_dt else ""
 
 def sync_tailscale_state_to_render():
     state_file = "/var/lib/tailscale/tailscaled.state"
@@ -91,18 +105,20 @@ async def tailscale_guardian_loop():
     logged_out_consecutive = 0
     while True:
         try:
-            status_res = subprocess.run(["tailscale", "status"], capture_output=True, text=True, timeout=5)
+            status_res = await asyncio.to_thread(
+                subprocess.run, ["tailscale", "status"], capture_output=True, text=True, timeout=5
+            )
             output = (status_res.stdout or "") + (status_res.stderr or "")
             if "Logged out" in output or status_res.returncode != 0:
                 logged_out_consecutive += 1
                 if logged_out_consecutive >= 3:
                     print("[Tailscale Guardian] Tailscale logged out for 3 checks. Reconnecting...")
-                    run_tailscale_up(reset=False)
+                    await asyncio.to_thread(run_tailscale_up, None, False)
                     logged_out_consecutive = 0
             else:
                 logged_out_consecutive = 0
                 if not os.getenv("TS_STATE_SYNCED"):
-                    if sync_tailscale_state_to_render():
+                    if await asyncio.to_thread(sync_tailscale_state_to_render):
                         os.environ["TS_STATE_SYNCED"] = "1"
         except Exception as e:
             print(f"[Tailscale Guardian] Loop error: {e}")
@@ -129,6 +145,7 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates.env.filters["ist"] = format_ist
 
 # Pydantic schema for ticket creation
 class TicketCreateRequest(BaseModel):
@@ -172,45 +189,46 @@ DEFAULT_VEHICLE_TYPES = [
 
 # ---------------- Frontend Web Pages ----------------
 
+def _verify_admin_access(
+    key: Optional[str] = Query(None),
+    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")
+):
+    provided = x_admin_key or key
+    if not provided or provided != ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized: Admin key required")
+    return True
+
 @app.get("/api/tailscale-status")
-def tailscale_status():
+async def tailscale_status(
+    key: Optional[str] = Query(None),
+    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")
+):
     try:
-        out = subprocess.check_output(["tailscale", "status"], stderr=subprocess.STDOUT, timeout=5).decode()
+        res = await asyncio.to_thread(
+            subprocess.run, ["tailscale", "status"], capture_output=True, text=True, timeout=5
+        )
+        out = res.stdout or res.stderr or ""
+        if res.returncode != 0:
+            return {"status": "cmd_error", "connected": False}
         state_file = "/var/lib/tailscale/tailscaled.state"
-        has_state = os.path.exists(state_file)
-        has_env = bool(os.getenv("TS_STATE_B64"))
-        return {
+        payload = {
             "status": "ok",
-            "output": out,
-            "has_state_file": has_state,
-            "has_env_state": has_env
+            "connected": "Logged out" not in out,
+            "has_state_file": os.path.exists(state_file),
+            "has_env_state": bool(os.getenv("TS_STATE_B64"))
         }
-    except subprocess.CalledProcessError as e:
-        return {"status": "cmd_error", "output": e.output.decode() if e.output else str(e)}
+        if (x_admin_key or key) == ADMIN_KEY:
+            payload["output"] = out
+        return payload
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
 @app.get("/api/tailscale-up")
-def do_tailscale_up(key: Optional[str] = None):
-    return run_tailscale_up(force_key=key)
-
-@app.get("/api/tailscale-state")
-def tailscale_state_export():
-    state_file = "/var/lib/tailscale/tailscaled.state"
-    if os.path.exists(state_file):
-        try:
-            with open(state_file, "rb") as f:
-                content = f.read()
-            b64_str = base64.b64encode(content).decode("ascii")
-            return {
-                "status": "ok",
-                "size_bytes": len(content),
-                "state_b64": b64_str,
-                "env_saved": bool(os.getenv("TS_STATE_B64"))
-            }
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    return {"status": "not_found", "message": "State file does not exist yet"}
+async def do_tailscale_up(
+    authkey: Optional[str] = None,
+    _auth: bool = Depends(_verify_admin_access)
+):
+    return await asyncio.to_thread(run_tailscale_up, authkey, False)
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page(request: Request, session: Session = Depends(get_cloud_session)):
@@ -291,13 +309,29 @@ async def api_camera_snapshot(camera: str = Query("front", pattern="^(front|rear
 async def api_gemini_detect():
     """
     Triggers Dual-Camera Fusion ANPR using Gemini AI directly in Cloud.
-    Pulls front and rear frames on-demand from Home PC.
+    Pulls front and rear frames on-demand in parallel from Home PC (no placeholders).
     """
-    front_bytes = await edge_client.get_camera_snapshot(camera="front")
-    rear_bytes = await edge_client.get_camera_snapshot(camera="rear")
+    front_bytes, rear_bytes = await asyncio.gather(
+        edge_client.get_camera_snapshot(camera="front", allow_placeholder=False),
+        edge_client.get_camera_snapshot(camera="rear", allow_placeholder=False)
+    )
+    if not front_bytes and not rear_bytes:
+        return {"success": False, "vehicle_no": "", "error": "Cameras offline / Home PC unreachable"}
 
     res = await gemini_cloud.detect_fusion(front_bytes=front_bytes, rear_bytes=rear_bytes)
     return res
+
+@app.post("/api/gemini/upload")
+async def api_gemini_upload(file: UploadFile = File(...)):
+    """
+    Scans an operator-uploaded vehicle photo using Gemini AI ANPR.
+    """
+    img_bytes = await file.read()
+    if not img_bytes:
+        raise HTTPException(status_code=400, detail="Empty file uploaded")
+    if len(img_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image too large (max 10 MB)")
+    return await gemini_cloud.detect_fusion(front_bytes=img_bytes, rear_bytes=None)
 
 @app.get("/api/vehicle-lookup")
 async def api_vehicle_lookup(v: str = Query("", min_length=2), session: Session = Depends(get_cloud_session)):
@@ -320,7 +354,7 @@ async def api_vehicle_lookup(v: str = Query("", min_length=2), session: Session 
             "open_ticket": {
                 "ticket_no": open_ticket.ticket_no,
                 "first_weight": fw_val,
-                "first_weight_at": open_ticket.created_at.strftime("%d-%m-%Y %H:%M") if open_ticket.created_at else "",
+                "first_weight_at": format_ist(open_ticket.first_weight_at or open_ticket.created_at, "%d-%m-%Y %H:%M"),
                 "customer_name": open_ticket.customer_name or "",
                 "mobile": open_ticket.mobile or "",
                 "vehicle_type": open_ticket.vehicle_type or "🚚 Lorry / லாரி",
@@ -343,7 +377,7 @@ async def api_vehicle_lookup(v: str = Query("", min_length=2), session: Session 
             "found": True,
             "has_open": False,
             "stored_tare": tare_val,
-            "stored_tare_date": past_ticket.created_at.strftime("%d-%m-%Y") if past_ticket.created_at else "",
+            "stored_tare_date": format_ist(past_ticket.created_at, "%d-%m-%Y"),
             "customer_name": past_ticket.customer_name or "",
             "mobile": past_ticket.mobile or "",
             "vehicle_type": past_ticket.vehicle_type or "🚚 Lorry / லாரி",
@@ -386,31 +420,41 @@ async def api_ticket_save_and_print(
         ticket.net_weight = req.net_weight
         ticket.charge = req.charge
         ticket.status = "COMPLETED"
-        from datetime import timezone
         ticket.second_weight_at = datetime.now(timezone.utc)
+        session.commit()
+        session.refresh(ticket)
     else:
-        from datetime import timezone
-        ticket = CloudTicket(
-            ticket_no=req.ticket_no,
-            vehicle_no=clean_v,
-            customer_name=req.customer_name.strip(),
-            mobile=req.mobile.strip(),
-            vehicle_type=req.vehicle_type,
-            load_status=req.load_status,
-            material=req.material.strip(),
-            gross_weight=req.gross_weight,
-            tare_weight=req.tare_weight,
-            net_weight=req.net_weight,
-            first_weight=req.first_weight,
-            charge=req.charge,
-            status="FIRST_WEIGHT" if is_stage_first else "COMPLETED",
-            first_weight_at=datetime.now(timezone.utc) if is_stage_first else None,
-            second_weight_at=datetime.now(timezone.utc) if not is_stage_first else None
-        )
-        session.add(ticket)
-
-    session.commit()
-    session.refresh(ticket)
+        ticket = None
+        for _ in range(3):
+            next_ticket_no = get_next_cloud_ticket_number(session)
+            now_utc = datetime.now(timezone.utc)
+            candidate = CloudTicket(
+                ticket_no=next_ticket_no,
+                vehicle_no=clean_v,
+                customer_name=req.customer_name.strip(),
+                mobile=req.mobile.strip(),
+                vehicle_type=req.vehicle_type,
+                load_status=req.load_status,
+                material=req.material.strip(),
+                gross_weight=req.gross_weight,
+                tare_weight=req.tare_weight,
+                net_weight=req.net_weight,
+                first_weight=req.first_weight if is_stage_first else None,
+                charge=req.charge,
+                status="FIRST_WEIGHT" if is_stage_first else "COMPLETED",
+                first_weight_at=now_utc if is_stage_first else None,
+                second_weight_at=now_utc if not is_stage_first else None
+            )
+            session.add(candidate)
+            try:
+                session.commit()
+                session.refresh(candidate)
+                ticket = candidate
+                break
+            except IntegrityError:
+                session.rollback()
+        if not ticket:
+            raise HTTPException(status_code=409, detail="Concurrent ticket number conflict; please retry.")
 
     # 2. Render slip HTML
     slip_html = templates.get_template("slip.html").render({
@@ -429,7 +473,6 @@ async def api_ticket_save_and_print(
         copies=req.copies
     )
 
-    from datetime import timezone
     ticket.printed = print_res.get("success", False)
     if ticket.printed:
         ticket.printed_at = datetime.now(timezone.utc)
@@ -440,6 +483,7 @@ async def api_ticket_save_and_print(
         "success": True,
         "ticket_no": ticket.ticket_no,
         "status": ticket.status,
+        "print_success": bool(ticket.printed),
         "print_status": print_res.get("message", "Print dispatched to Epson L3350")
     }
 

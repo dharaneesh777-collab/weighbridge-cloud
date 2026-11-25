@@ -1,7 +1,9 @@
-import time
-import re
+import asyncio
 import base64
 import io
+import os
+import re
+import time
 from typing import Dict, Any, Optional
 import httpx
 from PIL import Image, ImageDraw
@@ -30,8 +32,13 @@ class EdgeClient:
         self._cache_ttl_sec: float = 1.0  # Shield Home PC scale with 1s cache
         self._camera_cache: Dict[str, Dict[str, Any]] = {}
         self._camera_cache_ttl: float = 8.0  # Shield Home PC cameras with 8s cache
+        self._camera_locks: Dict[str, asyncio.Lock] = {
+            "front": asyncio.Lock(),
+            "rear": asyncio.Lock()
+        }
         self._consecutive_weight_failures: int = 0
-        self._working_weight_endpoint: str = "/api/live-weight"
+        self._reconnecting_tailscale: bool = False
+        self._working_weight_endpoint: str = "/api/edge/live-weight"
 
         # Separate HTTP clients so camera frame downloads never block scale reading
         self._scale_client = httpx.AsyncClient(timeout=4.0)
@@ -43,6 +50,36 @@ class EdgeClient:
             "X-Bridge-Key": EDGE_KEY,
             "User-Agent": "WeighbridgeCloudApp/1.0"
         }
+
+    async def _self_heal_tailscale(self):
+        if self._reconnecting_tailscale:
+            return
+        self._reconnecting_tailscale = True
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "tailscale", "status",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            out = (stdout or b"").decode(errors="ignore") + (stderr or b"").decode(errors="ignore")
+            if "Logged out" in out or proc.returncode != 0:
+                authkey = os.getenv("TAILSCALE_AUTHKEY", "")
+                hostname = os.getenv("TAILSCALE_HOSTNAME", "render-weighbridge")
+                if authkey:
+                    up_proc = await asyncio.create_subprocess_exec(
+                        "tailscale", "up",
+                        f"--authkey={authkey}",
+                        f"--hostname={hostname}",
+                        "--accept-routes",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    await asyncio.wait_for(up_proc.communicate(), timeout=20.0)
+        except Exception:
+            pass
+        finally:
+            self._reconnecting_tailscale = False
 
     async def get_live_weight(self, force_refresh: bool = False) -> Dict[str, Any]:
         now = time.time()
@@ -91,16 +128,9 @@ class EdgeClient:
         if self._consecutive_weight_failures >= 3:
             self._cached_weight["edge_online"] = False
             self._cached_weight["status_label"] = "HOME_PC_OFFLINE"
-            # Trigger self-healing if logged out
-            if self._consecutive_weight_failures % 5 == 0:
-                try:
-                    import subprocess
-                    chk = subprocess.run(["tailscale", "status"], capture_output=True, text=True, timeout=2)
-                    if "Logged out" in chk.stdout or chk.returncode != 0:
-                        from main import run_tailscale_up
-                        run_tailscale_up()
-                except Exception:
-                    pass
+            # Trigger non-blocking self-healing if logged out
+            if self._consecutive_weight_failures % 5 == 0 and not self._reconnecting_tailscale:
+                asyncio.create_task(self._self_heal_tailscale())
         
         return self._cached_weight
 
@@ -117,7 +147,7 @@ class EdgeClient:
         except Exception:
             return b""
 
-    async def get_camera_snapshot(self, camera: str = "front") -> Optional[bytes]:
+    async def get_camera_snapshot(self, camera: str = "front", allow_placeholder: bool = True) -> Optional[bytes]:
         cam_type = "front" if camera in ("front", "both") else "rear"
         now = time.time()
 
@@ -127,44 +157,54 @@ class EdgeClient:
             if now - entry["timestamp"] < self._camera_cache_ttl:
                 return entry["bytes"]
 
-        # 2. Query Home PC camera test endpoint (returns high-res JPEG base64)
-        url = f"{EDGE_URL}/api/camera/test?type={cam_type}"
-        try:
-            res = await self._camera_client.get(url, headers=self._headers(), timeout=7.0)
-            if res.status_code == 200:
-                data = res.json()
-                b64_str = data.get("image_b64")
-                if b64_str:
-                    img_bytes = base64.b64decode(b64_str)
+        # Serialize concurrent refreshes per camera so Home PC RTSP isn't hit twice
+        async with self._camera_locks[cam_type]:
+            now = time.time()
+            if cam_type in self._camera_cache:
+                entry = self._camera_cache[cam_type]
+                if now - entry["timestamp"] < self._camera_cache_ttl:
+                    return entry["bytes"]
+
+            # 2. Query Home PC camera test endpoint (returns high-res JPEG base64)
+            url = f"{EDGE_URL}/api/camera/test?type={cam_type}"
+            try:
+                res = await self._camera_client.get(url, headers=self._headers(), timeout=7.0)
+                if res.status_code == 200:
+                    data = res.json()
+                    b64_str = data.get("image_b64")
+                    if b64_str:
+                        img_bytes = base64.b64decode(b64_str)
+                        self._camera_cache[cam_type] = {
+                            "bytes": img_bytes,
+                            "timestamp": now
+                        }
+                        return img_bytes
+            except Exception:
+                pass
+
+            # 3. Fallback: Edge snapshot endpoint
+            try:
+                edge_url = f"{EDGE_URL}/api/edge/camera/snapshot?camera={cam_type}"
+                res = await self._camera_client.get(edge_url, headers=self._headers(), timeout=5.0)
+                if res.status_code == 200 and res.headers.get("content-type", "").startswith("image/"):
+                    img_bytes = res.content
                     self._camera_cache[cam_type] = {
                         "bytes": img_bytes,
                         "timestamp": now
                     }
                     return img_bytes
-        except Exception:
-            pass
+            except Exception:
+                pass
 
-        # 3. Fallback: Edge snapshot endpoint
-        try:
-            edge_url = f"{EDGE_URL}/api/edge/camera/snapshot?camera={cam_type}"
-            res = await self._camera_client.get(edge_url, headers=self._headers(), timeout=5.0)
-            if res.status_code == 200 and res.headers.get("content-type", "").startswith("image/"):
-                img_bytes = res.content
-                self._camera_cache[cam_type] = {
-                    "bytes": img_bytes,
-                    "timestamp": now
-                }
-                return img_bytes
-        except Exception:
-            pass
-
-        # 4. Fallback to existing cached frame (up to 120s) to prevent black standby during network glitches
-        if cam_type in self._camera_cache and self._camera_cache[cam_type].get("bytes"):
-            if now - self._camera_cache[cam_type].get("timestamp", 0) < 120.0:
-                return self._camera_cache[cam_type]["bytes"]
+            # 4. Fallback to existing cached frame (up to 120s) to prevent black standby during network glitches
+            if cam_type in self._camera_cache and self._camera_cache[cam_type].get("bytes"):
+                if now - self._camera_cache[cam_type].get("timestamp", 0) < 120.0:
+                    return self._camera_cache[cam_type]["bytes"]
 
         # 5. Fallback placeholder (clean visual image, zero broken icons)
-        return self._generate_placeholder(cam_type, "STANDBY")
+        if allow_placeholder:
+            return self._generate_placeholder(cam_type, "STANDBY")
+        return None
 
     async def print_slip(
         self,

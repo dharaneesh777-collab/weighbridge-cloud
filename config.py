@@ -1,9 +1,12 @@
 import os
+from datetime import timezone, timedelta
 from pathlib import Path
 
 CLOUD_DIR = Path(__file__).resolve().parent
 EDGE_URL = os.getenv("EDGE_URL", "http://100.101.78.57:8000").rstrip("/")
 EDGE_KEY = os.getenv("EDGE_KEY", "wb_edge_secret_key_8842")
+ADMIN_KEY = os.getenv("ADMIN_KEY", EDGE_KEY)
+IST = timezone(timedelta(hours=5, minutes=30))
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")

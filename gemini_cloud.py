@@ -73,10 +73,14 @@ class GeminiCloudService:
             "Return ONLY valid JSON matching this schema:\n"
             "{\n"
             '  "vehicle_no": "TN33AB1234",\n'
-            '  "vehicle_type": "10-Wheeler",\n'
+            '  "vehicle_class": "🚚 Lorry / லாரி",\n'
+            '  "material": "",\n'
             '  "confidence": 0.95,\n'
             '  "notes": "Verified from both cameras"\n'
             "}\n"
+            "For vehicle_class, pick the closest match from: "
+            '"🚚 Lorry / லாரி", "🚐 Tempo / டெம்போ", "🛺 Auto / ஆட்டோ", '
+            '"🚜 Tractor / டிராக்டர்", "🚛 Tipper / டிப்பர்", "🚗 Car / Van / இதர". '
             "Ensure vehicle_no is uppercase, without spaces (e.g., TN33AB1234). If unreadable, return empty string."
         )
 
@@ -106,21 +110,25 @@ class GeminiCloudService:
 
         # Model fallback chain
         models = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=12.0) as client:
             for model_name in models:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
                 try:
-                    res = await client.post(url, json=body)
+                    res = await client.post(url, json=body, headers=headers)
                     if res.status_code == 200:
                         data = res.json()
                         text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
                         parsed = json.loads(text)
                         
                         clean_no = re.sub(r"[^A-Z0-9]", "", str(parsed.get("vehicle_no", "")).upper())
+                        v_class = parsed.get("vehicle_class") or parsed.get("vehicle_type") or ""
                         result = {
                             "success": bool(clean_no),
                             "vehicle_no": clean_no,
-                            "vehicle_type": parsed.get("vehicle_type", "Truck"),
+                            "vehicle_class": v_class,
+                            "vehicle_type": v_class or "Truck",
+                            "material": parsed.get("material", ""),
                             "confidence": float(parsed.get("confidence", 0.9)),
                             "model_used": model_name
                         }

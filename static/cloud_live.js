@@ -8,6 +8,8 @@ let currentStage = '1ST_WEIGHT'; // '1ST_WEIGHT' | '2ND_WEIGHT'
 let firstWeightVal = 0;
 let autoPilotEnabled = false;
 let autoPilotTriggered = false;
+let autoPilotLastAttempt = 0;
+let initialNextTicketNo = '';
 let livePollFailures = 0;
 let isRefreshingCameras = false;
 
@@ -86,15 +88,18 @@ async function pollLiveWeight() {
         }
 
         // Auto-Pilot Trigger: Vehicle stably parked (> 500 kg)
-        if (autoPilotEnabled && isScaleStable && currentLiveWeight >= 500 && !autoPilotTriggered) {
+        if (autoPilotEnabled && isScaleStable && currentLiveWeight >= 500) {
             const vehNo = document.getElementById('vehicle_no')?.value.trim();
-            if (!vehNo) {
+            const nowMs = Date.now();
+            if (!vehNo && (!autoPilotTriggered || (nowMs - autoPilotLastAttempt > 15000))) {
                 autoPilotTriggered = true;
+                autoPilotLastAttempt = nowMs;
                 runGeminiFusionANPR();
             }
         } else if (currentLiveWeight < 200) {
             // Reset trigger when scale is empty
             autoPilotTriggered = false;
+            autoPilotLastAttempt = 0;
         }
 
         // Recalculate Net Weight in real time
@@ -103,7 +108,8 @@ async function pollLiveWeight() {
     } catch (err) {
         console.warn('Live scale poll error:', err);
     } finally {
-        setTimeout(pollLiveWeight, 1000);
+        const isWeighPage = Boolean(document.getElementById('weighForm'));
+        setTimeout(pollLiveWeight, isWeighPage ? 1000 : 10000);
     }
 }
 
@@ -225,6 +231,9 @@ async function lookupVehicleDetails(val) {
 
             document.getElementById('formStage').value = 'COMPLETED';
             document.getElementById('formFirstWeight').value = firstWeightVal;
+            if (ot.ticket_no && document.getElementById('serial_no_display')) {
+                document.getElementById('serial_no_display').value = ot.ticket_no;
+            }
 
             // Fill form with initial data
             if (ot.customer_name) document.getElementById('customer_name').value = ot.customer_name;
@@ -279,6 +288,11 @@ async function lookupVehicleDetails(val) {
                 storedTareVal.textContent = Number(data.stored_tare).toLocaleString('en-IN');
                 storedTareDate.textContent = `(${data.stored_tare_date || 'Past'})`;
                 storedTareBox.classList.remove('hidden');
+                const manualTareEl = document.getElementById('manual_tare');
+                if (manualTareEl && !manualTareEl.value) {
+                    manualTareEl.value = Number(data.stored_tare);
+                    recalcNetWeight();
+                }
             } else if (storedTareBox) {
                 storedTareBox.classList.add('hidden');
             }
@@ -300,6 +314,9 @@ function startFreshTicket() {
     firstWeightVal = 0;
     document.getElementById('formStage').value = 'FIRST_WEIGHT';
     document.getElementById('formFirstWeight').value = '';
+    if (initialNextTicketNo && document.getElementById('serial_no_display')) {
+        document.getElementById('serial_no_display').value = initialNextTicketNo;
+    }
     document.getElementById('firstWeightFieldContainer')?.classList.add('hidden');
     if (currentMode === 'double') {
         document.getElementById('netWeightFieldContainer')?.classList.add('hidden');
@@ -380,23 +397,30 @@ async function runGeminiFusionANPR() {
                 vInput.value = data.vehicle_no;
                 lookupVehicleDetails(data.vehicle_no);
             }
-            if (data.vehicle_class && document.getElementById('vehicle_type')) {
-                document.getElementById('vehicle_type').value = data.vehicle_class;
-                updateTariffByVehicleAndLoad();
+            const detectedClass = data.vehicle_class || data.vehicle_type;
+            if (detectedClass && document.getElementById('vehicle_type')) {
+                const vtSelect = document.getElementById('vehicle_type');
+                const matchOpt = Array.from(vtSelect.options).find(o => o.value === detectedClass || o.value.includes(detectedClass));
+                if (matchOpt) {
+                    vtSelect.value = matchOpt.value;
+                    updateTariffByVehicleAndLoad();
+                }
             }
             if (data.material && document.getElementById('material')) {
-                document.getElementById('material').value = data.material;
+                const matSelect = document.getElementById('material');
+                const matchMat = Array.from(matSelect.options).find(o => o.value === data.material || o.value.includes(data.material));
+                if (matchMat) matSelect.value = matchMat.value;
             }
 
             if (feedback) {
                 feedback.className = 'mt-2 p-2 rounded-xl text-xs font-bold border border-emerald-300 bg-emerald-50 text-emerald-900 flex items-center justify-between';
-                feedback.innerHTML = `<span>✨ Detected: <strong>${data.vehicle_no}</strong> (${data.vehicle_class || ''})</span><button type="button" onclick="this.parentElement.remove()" class="text-emerald-700">&times;</button>`;
+                feedback.innerHTML = `<span>✨ Detected: <strong>${data.vehicle_no}</strong> (${detectedClass || 'Vehicle'})</span><button type="button" onclick="this.parentElement.classList.add('hidden')" class="text-emerald-700">&times;</button>`;
                 feedback.classList.remove('hidden');
             }
         } else {
             if (feedback) {
                 feedback.className = 'mt-2 p-2 rounded-xl text-xs font-bold border border-amber-300 bg-amber-50 text-amber-900 flex items-center justify-between';
-                feedback.innerHTML = `<span>⚠️ ${data.message || 'Plate not detected clearly'}. Try manual entry.</span><button type="button" onclick="this.parentElement.remove()" class="text-amber-700">&times;</button>`;
+                feedback.innerHTML = `<span>⚠️ ${data.error || data.message || 'Plate not detected clearly'}. Try manual entry.</span><button type="button" onclick="this.parentElement.classList.add('hidden')" class="text-amber-700">&times;</button>`;
                 feedback.classList.remove('hidden');
             }
         }
@@ -428,10 +452,43 @@ function startVoiceRecognition() {
 }
 
 // Photo Upload Scan
-function handlePhotoUpload(e) {
+async function handlePhotoUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
-    alert(`File "${file.name}" uploaded. Gemini vision scan ready.`);
+
+    const btnText = document.getElementById('geminiFusionBtnText');
+    const feedback = document.getElementById('geminiScanFeedback');
+    if (btnText) btnText.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Scanning Photo...';
+    if (feedback) feedback.classList.add('hidden');
+
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch('/api/gemini/upload', { method: 'POST', body: formData });
+        const data = await res.json();
+
+        if (data.success && data.vehicle_no) {
+            const vInput = document.getElementById('vehicle_no');
+            if (vInput) {
+                vInput.value = data.vehicle_no;
+                lookupVehicleDetails(data.vehicle_no);
+            }
+            if (feedback) {
+                feedback.className = 'mt-2 p-2 rounded-xl text-xs font-bold border border-emerald-300 bg-emerald-50 text-emerald-900 flex items-center justify-between';
+                feedback.innerHTML = `<span>📸 Photo Scan: <strong>${data.vehicle_no}</strong></span><button type="button" onclick="this.parentElement.classList.add('hidden')" class="text-emerald-700">&times;</button>`;
+                feedback.classList.remove('hidden');
+            }
+        } else if (feedback) {
+            feedback.className = 'mt-2 p-2 rounded-xl text-xs font-bold border border-amber-300 bg-amber-50 text-amber-900 flex items-center justify-between';
+            feedback.innerHTML = `<span>⚠️ ${data.error || 'Could not read plate from uploaded photo.'}</span><button type="button" onclick="this.parentElement.classList.add('hidden')" class="text-amber-700">&times;</button>`;
+            feedback.classList.remove('hidden');
+        }
+    } catch (err) {
+        console.warn('Photo upload scan error:', err);
+    } finally {
+        e.target.value = '';
+        if (btnText) btnText.textContent = 'Dual AI Fusion';
+    }
 }
 
 // Pre-Print Verification Modal
@@ -571,8 +628,12 @@ async function doConfirmSubmit() {
 
         const data = await res.json();
 
-        if (data.success) {
-            alert(`✅ Ticket #${data.ticket_no} Saved Successfully!\n${data.print_status}`);
+        if (res.ok && data.success) {
+            if (data.print_success) {
+                alert(`✅ Ticket #${data.ticket_no} Saved & Printed Successfully!\n${data.print_status}`);
+            } else {
+                alert(`⚠️ Ticket #${data.ticket_no} Saved to Cloud DB, but Printer Failed:\n${data.print_status}`);
+            }
             window.location.reload();
         } else {
             alert(`Save error: ${data.detail || 'Unknown error'}`);
@@ -588,6 +649,10 @@ async function doConfirmSubmit() {
 
 // Initialize on page load
 window.addEventListener('DOMContentLoaded', () => {
+    const serialEl = document.getElementById('serial_no_display');
+    if (serialEl) initialNextTicketNo = serialEl.value;
     pollLiveWeight();
-    refreshCameraPreviews();
+    if (document.getElementById('frontCameraImg')) {
+        refreshCameraPreviews();
+    }
 });
