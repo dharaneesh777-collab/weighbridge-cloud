@@ -455,8 +455,12 @@ async function runGeminiFusionANPR() {
     }
 }
 
-// Voice Recognition
+// Voice Recognition (delegates to Smart Bilingual Gemini Voice Assistant HUD)
 function startVoiceRecognition() {
+    if (typeof window.toggleGeminiVoiceAssistant === 'function') {
+        window.toggleGeminiVoiceAssistant();
+        return;
+    }
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
         alert('Voice input not supported in this browser. Please use Chrome/Edge.');
@@ -473,6 +477,27 @@ function startVoiceRecognition() {
         }
     };
     recognition.start();
+}
+
+function getCloudLiveWeight() {
+    return currentLiveWeight;
+}
+
+function resetCloudWeighForm() {
+    ['vehicle_no', 'customer_name', 'mobile', 'manual_tare'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    });
+    document.getElementById('storedTareBox')?.classList.add('hidden');
+    document.getElementById('geminiScanFeedback')?.classList.add('hidden');
+    if (typeof startFreshTicket === 'function') {
+        startFreshTicket();
+    }
+    setLoadCondition('Loaded / லோடு');
+    const cpEl = document.getElementById('copies');
+    if (cpEl) cpEl.value = '1';
+    autoPilotTriggered = false;
+    autoPilotLastAttempt = 0;
 }
 
 // Photo Upload Scan

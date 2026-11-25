@@ -171,6 +171,10 @@ class TicketCreateRequest(BaseModel):
     charge: float = 100.0
     copies: int = 1
 
+class VoiceCommandRequest(BaseModel):
+    speech: str
+    lang: Optional[str] = "mixed"
+
 DEFAULT_MATERIALS = [
     "General Cargo / பொதுச் சரக்கு",
     "Sand / மணல்",
@@ -352,6 +356,71 @@ async def api_gemini_upload(file: UploadFile = File(...)):
     if len(img_bytes) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Image too large (max 10 MB)")
     return await gemini_cloud.detect_fusion(front_bytes=img_bytes, rear_bytes=None)
+
+async def _compute_today_metrics_ist(session: Session) -> dict:
+    """Computes today's (IST) weighbridge stats from Firestore or SQL database."""
+    today_ist_date = datetime.now(IST).date()
+    if firestore_store.is_enabled():
+        all_tickets = await asyncio.to_thread(firestore_store.list_tickets, 500)
+    else:
+        all_tickets = session.exec(select(CloudTicket).order_by(desc(CloudTicket.id)).limit(500)).all()
+
+    today_tickets = []
+    open_count = 0
+    for t in all_tickets:
+        if t.status == "FIRST_WEIGHT":
+            open_count += 1
+        t_ist = to_ist(t.created_at)
+        if t_ist and t_ist.date() == today_ist_date:
+            today_tickets.append(t)
+
+    total_net_kg = sum((t.net_weight or 0.0) for t in today_tickets)
+    total_revenue = sum((t.charge or 0.0) for t in today_tickets)
+    return {
+        "date_ist": today_ist_date.strftime("%d-%m-%Y"),
+        "today_tickets_count": len(today_tickets),
+        "today_completed_count": sum(1 for t in today_tickets if t.status == "COMPLETED"),
+        "today_open_count": open_count,
+        "today_total_net_kg": round(total_net_kg, 1),
+        "today_total_net_tons": round(total_net_kg / 1000.0, 2),
+        "today_total_revenue_rs": round(total_revenue, 2),
+    }
+
+@app.post("/api/gemini/voice_command")
+async def api_gemini_voice_command(
+    req: VoiceCommandRequest,
+    session: Session = Depends(get_cloud_session)
+):
+    """
+    Smart Bilingual Voice Assistant (Tamil, English & Tanglish).
+    Parses operator speech into form fills, scale/camera actions, or live IST Firestore copilot queries.
+    """
+    speech = (req.speech or "").strip()
+    if not speech:
+        return {"success": False, "error": "No speech text provided"}
+
+    res = await gemini_cloud.parse_voice_command(
+        speech_text=speech,
+        current_lang=req.lang or "mixed",
+        valid_materials=DEFAULT_MATERIALS,
+        valid_vehicle_types=DEFAULT_VEHICLE_TYPES,
+    )
+    if not res.get("success"):
+        return res
+
+    if res.get("action") == "copilot_query":
+        metrics = await _compute_today_metrics_ist(session)
+        copilot_res = await gemini_cloud.answer_copilot_query(
+            question=res.get("copilot_question") or speech,
+            metrics=metrics,
+            lang=req.lang or "mixed",
+        )
+        res["metrics"] = metrics
+        if copilot_res.get("success"):
+            res["copilot_answer"] = copilot_res.get("answer")
+            res["spoken_reply"] = copilot_res.get("spoken_reply") or res.get("spoken_reply")
+
+    return res
 
 @app.get("/api/vehicle-lookup")
 async def api_vehicle_lookup(v: str = Query("", min_length=2), session: Session = Depends(get_cloud_session)):

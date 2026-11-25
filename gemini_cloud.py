@@ -1,23 +1,37 @@
 import base64
 import hashlib
 import json
+import os
 import re
 import time
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 import httpx
 from PIL import Image
 import io
 
 try:
-    from cloud_app.config import GEMINI_API_KEY, GEMINI_MODEL
+    from cloud_app.config import GEMINI_API_KEY
 except ImportError:
-    from config import GEMINI_API_KEY, GEMINI_MODEL
+    from config import GEMINI_API_KEY
+
 
 class GeminiCloudService:
     """
-    Serverless-ready Gemini client for Vercel.
-    Directly processes Front and Rear camera frames for Dual-Camera Fusion ANPR.
+    Async Gemini client for Cloud Portal.
+    Supports Dual-Camera Fusion ANPR, Bilingual (English/Tamil/Tanglish) Voice
+    Command Parsing, and Live Operational Copilot queries.
     """
+
+    MODELS = [
+        "gemini-3-flash-preview",
+        "gemini-3.5-flash-lite",
+        "gemini-flash-lite-latest",
+        "gemini-3.5-flash",
+        "gemini-3.8-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-flash-latest"
+    ]
+
     def __init__(self):
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_ttl_sec = 60.0
@@ -41,6 +55,47 @@ class GeminiCloudService:
     def _hash_bytes(self, b: bytes) -> str:
         return hashlib.sha256(b).hexdigest()
 
+    async def _call_gemini_json(self, parts: List[Dict[str, Any]], timeout: float = 9.0) -> Dict[str, Any]:
+        """
+        Shared async Gemini REST helper (bypasses Tailscale proxy via trust_env=False).
+        Returns {"success": True, "data": <parsed_dict>, "model_used": <str>} on success.
+        """
+        api_key = (os.getenv("GEMINI_API_KEY") or GEMINI_API_KEY or "").strip()
+        if not api_key:
+            return {"success": False, "error": "Gemini API key is not configured."}
+
+        body = {
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "response_mime_type": "application/json",
+                "temperature": 0.1
+            }
+        }
+        headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+        last_error = "Gemini service unavailable"
+
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            for model_name in self.MODELS:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                try:
+                    res = await client.post(url, json=body, headers=headers)
+                    if res.status_code == 200:
+                        payload = res.json()
+                        text = payload["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        if text.startswith("```"):
+                            text = re.sub(r"^```(?:json)?\s*", "", text)
+                            text = re.sub(r"\s*```$", "", text)
+                        parsed = json.loads(text)
+                        return {"success": True, "data": parsed, "model_used": model_name}
+                    last_error = f"Gemini HTTP {res.status_code}"
+                    if res.status_code in (404, 429, 503):
+                        continue
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    continue
+
+        return {"success": False, "error": last_error}
+
     async def detect_fusion(
         self,
         front_bytes: Optional[bytes],
@@ -62,7 +117,6 @@ class GeminiCloudService:
             rear_bytes = self.optimize_image(rear_bytes)
             combined_hash += self._hash_bytes(rear_bytes)[:16]
 
-        # Check in-memory cache
         now = time.time()
         if combined_hash in self._cache:
             entry = self._cache[combined_hash]
@@ -94,60 +148,127 @@ class GeminiCloudService:
             "Ensure vehicle_no is uppercase without spaces (e.g., TN33AB1234). If plate is unreadable, return empty string."
         )
 
-        parts = [{"text": prompt}]
+        parts: List[Dict[str, Any]] = [{"text": prompt}]
         if front_bytes:
-            parts.append({
-                "inline_data": {
-                    "mime_type": "image/jpeg",
-                    "data": base64.b64encode(front_bytes).decode("utf-8")
-                }
-            })
+            parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(front_bytes).decode("utf-8")}})
         if rear_bytes:
-            parts.append({
-                "inline_data": {
-                    "mime_type": "image/jpeg",
-                    "data": base64.b64encode(rear_bytes).decode("utf-8")
-                }
-            })
+            parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(rear_bytes).decode("utf-8")}})
 
-        body = {
-            "contents": [{"parts": parts}],
-            "generationConfig": {
-                "response_mime_type": "application/json",
-                "temperature": 0.1
+        res = await self._call_gemini_json(parts, timeout=10.0)
+        if res.get("success"):
+            parsed = res["data"]
+            clean_no = re.sub(r"[^A-Z0-9]", "", str(parsed.get("vehicle_no", "")).upper())
+            v_class = parsed.get("vehicle_class") or parsed.get("vehicle_type") or ""
+            result = {
+                "success": bool(clean_no),
+                "vehicle_no": clean_no,
+                "vehicle_class": v_class,
+                "vehicle_type": v_class or "Truck",
+                "load_status": parsed.get("load_status", ""),
+                "material": parsed.get("material", ""),
+                "confidence": float(parsed.get("confidence", 0.9)),
+                "model_used": res["model_used"]
             }
-        }
+            self._cache[combined_hash] = {"ts": now, "data": result}
+            return result
 
-        # Model fallback chain (bypass Tailscale proxy for direct Google API access)
-        models = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
-        headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
-            for model_name in models:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-                try:
-                    res = await client.post(url, json=body, headers=headers)
-                    if res.status_code == 200:
-                        data = res.json()
-                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                        parsed = json.loads(text)
-                        
-                        clean_no = re.sub(r"[^A-Z0-9]", "", str(parsed.get("vehicle_no", "")).upper())
-                        v_class = parsed.get("vehicle_class") or parsed.get("vehicle_type") or ""
-                        result = {
-                            "success": bool(clean_no),
-                            "vehicle_no": clean_no,
-                            "vehicle_class": v_class,
-                            "vehicle_type": v_class or "Truck",
-                            "load_status": parsed.get("load_status", ""),
-                            "material": parsed.get("material", ""),
-                            "confidence": float(parsed.get("confidence", 0.9)),
-                            "model_used": model_name
-                        }
-                        self._cache[combined_hash] = {"ts": now, "data": result}
-                        return result
-                except Exception:
-                    continue
+        return {"success": False, "vehicle_no": "", "error": res.get("error", "Gemini ANPR unavailable")}
 
-        return {"success": False, "vehicle_no": "", "error": "Gemini ANPR unavailable"}
+    async def parse_voice_command(
+        self,
+        speech_text: str,
+        current_lang: str = "mixed",
+        valid_materials: Optional[List[str]] = None,
+        valid_vehicle_types: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Parses spoken Tamil, English, or Tanglish operator commands into structured
+        weighbridge form fields and actions using Gemini.
+        """
+        materials_str = ", ".join(f'"{m}"' for m in (valid_materials or []))
+        vtypes_str = ", ".join(f'"{v}"' for v in (valid_vehicle_types or []))
+
+        prompt = (
+            "You are a Smart Bilingual Voice Assistant (Tamil, English, and Tanglish) for "
+            "AGAN VENDHAN WEIGH BRIDGE in Tamil Nadu, India.\n"
+            f"Language preference hint: {current_lang}\n"
+            f'Operator utterance: "{speech_text}"\n\n'
+            "Extract the intent and structured fields into VALID JSON matching:\n"
+            "{\n"
+            '  "action": "fill_form" | "scan_plate" | "read_weight" | "submit_weigh" | "clear_form" | "navigate" | "copilot_query" | "general_help",\n'
+            '  "vehicle_no": "uppercase Indian plate without spaces/hyphens (e.g. TN33AB1234) or null",\n'
+            f'  "vehicle_type": "exact match from [{vtypes_str}] or null",\n'
+            '  "load_status": "\'Loaded / லோடு\' or \'Empty / காலி\' or null",\n'
+            f'  "material": "closest exact match from [{materials_str}] or null",\n'
+            '  "customer_name": "party/customer name if spoken, or null",\n'
+            '  "mobile": "10-digit Indian mobile number if spoken, or null",\n'
+            '  "copies": "integer 1, 2, or 3 if print copies mentioned, or null",\n'
+            '  "manual_tare": "numeric tare weight in kg if spoken in single weighment, or null",\n'
+            '  "weighment_type": "\'double\' or \'single\' or null",\n'
+            '  "navigate_to": "\'/\' or \'/tickets\' or null",\n'
+            '  "copilot_question": "the analytics question if action is copilot_query, else null",\n'
+            '  "spoken_reply": "Concise, natural confirmation under 12 words in the SAME language the user spoke (Tamil script if user spoke Tamil, English if English)"\n'
+            "}\n"
+            "Strict Rules:\n"
+            "- Understand Tamil words: மணல்=Sand, ஜல்லி=Gravel, சிமென்ட்=Cement, நெல்=Paddy, மக்காச்சோளம்=Maize, "
+            "கரும்பு=Sugarcane, மரம்=Timber, பருத்தி=Cotton, தேங்காய்=Coconut, இரும்பு=Iron Scrap, லோடு=Loaded, காலி=Empty, "
+            "லாரி=Lorry, டிப்பர்=Tipper, டிராக்டர்=Tractor, டெம்போ=Tempo, ஆட்டோ=Auto, கார்=Car / Van.\n"
+            "- If Tamil numerals/words for plate or copies are spoken (e.g. 'இரண்டு காப்பி' -> copies: 2), convert to digits.\n"
+            "- Revenue / ticket count / today tonnage / pending open tickets queries (e.g. 'இன்றைய கலெக்ஷன்', 'how many tickets today', 'open trucks') -> action: 'copilot_query'.\n"
+            "- Camera / ANPR / scan ('கேமரா ஸ்கேன்', 'scan plate') -> action: 'scan_plate'.\n"
+            "- Live weight ('எடை எவ்வளவு', 'what is weight') -> action: 'read_weight'.\n"
+            "- Save / print ('சேமி', 'பில் போடு', 'save and print') -> action: 'submit_weigh'.\n"
+            "- Clear / reset ('அழி', 'புதிய எடை', 'clear form') -> action: 'clear_form'.\n"
+            "- Navigation ('பதிவுகள்', 'tickets page', 'weigh page') -> action: 'navigate'.\n"
+            "- If any form fields are provided (vehicle_no, customer_name, material, load_status, copies, vehicle_type), action is 'fill_form'.\n"
+            "Return JSON ONLY."
+        )
+
+        res = await self._call_gemini_json([{"text": prompt}], timeout=9.0)
+        if not res.get("success"):
+            return {"success": False, "error": res.get("error", "Could not parse voice command")}
+
+        parsed = res["data"]
+        if parsed.get("vehicle_no"):
+            parsed["vehicle_no"] = re.sub(r"[^A-Z0-9]", "", str(parsed["vehicle_no"]).upper()) or None
+        if parsed.get("mobile"):
+            digits = re.sub(r"\D", "", str(parsed["mobile"]))
+            parsed["mobile"] = digits[-10:] if len(digits) >= 10 else None
+        if parsed.get("copies") is not None:
+            try:
+                parsed["copies"] = max(1, min(3, int(parsed["copies"])))
+            except Exception:
+                parsed["copies"] = None
+        parsed["success"] = True
+        parsed["model_used"] = res["model_used"]
+        return parsed
+
+    async def answer_copilot_query(
+        self,
+        question: str,
+        metrics: Dict[str, Any],
+        lang: str = "mixed"
+    ) -> Dict[str, Any]:
+        """
+        Answers operational business questions using live IST Firestore metrics.
+        """
+        prompt = (
+            "You are the AI Operational Copilot for AGAN VENDHAN WEIGH BRIDGE.\n"
+            f'Operator question ({lang}): "{question}"\n\n'
+            f"Live Today (IST) Weighbridge Metrics:\n{json.dumps(metrics, indent=2, ensure_ascii=False)}\n\n"
+            "Return VALID JSON:\n"
+            "{\n"
+            '  "answer": "Clear direct answer with exact numbers (under 30 words)",\n'
+            '  "spoken_reply": "Natural spoken answer under 15 words in the SAME language as the question (Tamil script if Tamil, English if English)"\n'
+            "}"
+        )
+        res = await self._call_gemini_json([{"text": prompt}], timeout=9.0)
+        if res.get("success"):
+            out = res["data"]
+            out["success"] = True
+            out["model_used"] = res["model_used"]
+            return out
+        return {"success": False, "error": res.get("error", "Copilot unavailable")}
+
 
 gemini_cloud = GeminiCloudService()
