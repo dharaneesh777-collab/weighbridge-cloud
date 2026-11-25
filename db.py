@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from typing import Optional, List
 from sqlalchemy import inspect, text
@@ -8,9 +9,15 @@ try:
 except ImportError:
     from config import DATABASE_URL
 
-# Handle SQLite vs Postgres connection args
-connect_args = {"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
-engine = create_engine(DATABASE_URL, echo=False, connect_args=connect_args)
+# Handle SQLite vs Postgres connection args (fall back to SQLite when Firestore is active)
+_use_firestore = bool(
+    os.getenv("FIREBASE_SERVICE_ACCOUNT_B64")
+    or os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+)
+_effective_db_url = "sqlite:///cloud_weighbridge.db" if _use_firestore else DATABASE_URL
+connect_args = {"check_same_thread": False} if "sqlite" in _effective_db_url else {}
+engine = create_engine(_effective_db_url, echo=False, connect_args=connect_args)
 
 def get_utc_now() -> datetime:
     return datetime.now(timezone.utc)
