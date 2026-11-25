@@ -24,10 +24,11 @@ class EdgeClient:
         self._cached_weight: Dict[str, Any] = {
             "weight": 0.0,
             "is_stable": True,
-            "status_label": "ONLINE (LIVE)",
-            "edge_online": True,
+            "status_label": "CONNECTING",
+            "edge_online": False,
             "timestamp": 0.0
         }
+        self._has_connected_once: bool = False
         self._last_fetch_time: float = 0.0
         self._cache_ttl_sec: float = 1.0  # Shield Home PC scale with 1s cache
         self._camera_cache: Dict[str, Dict[str, Any]] = {}
@@ -92,6 +93,7 @@ class EdgeClient:
             res = await self._scale_client.get(target_url, headers=self._headers())
             if res.status_code == 200:
                 self._consecutive_weight_failures = 0
+                self._has_connected_once = True
                 content_type = res.headers.get("content-type", "")
                 if "application/json" in content_type:
                     data = res.json()
@@ -123,9 +125,9 @@ class EdgeClient:
         except Exception:
             pass
 
-        # Debounce: only mark offline if 3 consecutive polls fail (prevents UI flickering)
+        # Debounce only after we've connected at least once; on cold boot report offline immediately
         self._consecutive_weight_failures += 1
-        if self._consecutive_weight_failures >= 3:
+        if (not self._has_connected_once) or (self._consecutive_weight_failures >= 3):
             self._cached_weight["edge_online"] = False
             self._cached_weight["status_label"] = "HOME_PC_OFFLINE"
             # Trigger non-blocking self-healing if logged out
@@ -134,13 +136,20 @@ class EdgeClient:
         
         return self._cached_weight
 
-    def _generate_placeholder(self, cam_type: str, reason: str = "WAITING") -> bytes:
+    def _generate_placeholder(self, cam_type: str, reason: str = "OFFLINE / STANDBY") -> bytes:
         try:
+            from PIL import ImageFont
             img = Image.new("RGB", (640, 360), color=(15, 23, 42))
             draw = ImageDraw.Draw(img)
-            draw.rectangle([(20, 20), (620, 340)], outline=(51, 65, 85), width=2)
-            label = f"CAM {cam_type.upper()} · {reason}"
-            draw.text((230, 170), label, fill=(148, 163, 184))
+            draw.rectangle([(20, 20), (620, 340)], outline=(71, 85, 105), width=2)
+            label = f"CAM {cam_type.upper()} • {reason}"
+            try:
+                font = ImageFont.load_default(size=22)
+            except TypeError:
+                font = ImageFont.load_default()
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text(((640 - tw) / 2, (360 - th) / 2), label, fill=(203, 213, 225), font=font)
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=80)
             return buf.getvalue()
@@ -156,6 +165,13 @@ class EdgeClient:
             entry = self._camera_cache[cam_type]
             if now - entry["timestamp"] < self._camera_cache_ttl:
                 return entry["bytes"]
+
+        # Fast-fail if Home PC is already known offline so UI doesn't hang for 12s
+        if not self._cached_weight.get("edge_online") and self._consecutive_weight_failures >= 2:
+            if cam_type in self._camera_cache and self._camera_cache[cam_type].get("bytes"):
+                if now - self._camera_cache[cam_type].get("timestamp", 0) < 120.0:
+                    return self._camera_cache[cam_type]["bytes"]
+            return self._generate_placeholder(cam_type, "HOME PC OFFLINE") if allow_placeholder else None
 
         # Serialize concurrent refreshes per camera so Home PC RTSP isn't hit twice
         async with self._camera_locks[cam_type]:

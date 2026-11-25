@@ -79,7 +79,7 @@ async function pollLiveWeight() {
                 edgeText.className = 'text-emerald-800 font-bold';
             } else {
                 livePollFailures++;
-                if (livePollFailures >= 5) {
+                if (data.status_label === 'HOME_PC_OFFLINE' || livePollFailures >= 3) {
                     edgeDot.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
                     edgeText.textContent = 'Home PC: Reconnecting...';
                     edgeText.className = 'text-amber-800 font-bold';
