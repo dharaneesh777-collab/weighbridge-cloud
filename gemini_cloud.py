@@ -44,10 +44,12 @@ class GeminiCloudService:
     async def detect_fusion(
         self,
         front_bytes: Optional[bytes],
-        rear_bytes: Optional[bytes]
+        rear_bytes: Optional[bytes],
+        live_weight: float = 0.0
     ) -> Dict[str, Any]:
         """
-        Multimodal fusion ANPR: Combines Front & Rear camera frames into a single Gemini prompt.
+        Multimodal fusion ANPR: Combines Front & Rear camera frames + scale weight
+        into a single Gemini prompt for plate, vehicle class, load status & material.
         """
         if not front_bytes and not rear_bytes:
             return {"success": False, "vehicle_no": "", "error": "No camera frames provided"}
@@ -67,21 +69,29 @@ class GeminiCloudService:
             if now - entry["ts"] < self._cache_ttl_sec:
                 return entry["data"]
 
+        weight_note = f"Measured platform scale weight: {int(live_weight)} kg.\n" if live_weight > 0 else ""
         prompt = (
             "Analyze these weighbridge camera images (Front and/or Rear of the truck/vehicle). "
-            "Cross-verify the Indian vehicle registration number plate across both images. "
+            + weight_note +
+            "Cross-verify the Indian vehicle registration number plate across both images and inspect the vehicle type and cargo bed. "
             "Return ONLY valid JSON matching this schema:\n"
             "{\n"
             '  "vehicle_no": "TN33AB1234",\n'
             '  "vehicle_class": "🚚 Lorry / லாரி",\n'
-            '  "material": "",\n'
+            '  "load_status": "Loaded / லோடு",\n'
+            '  "material": "General Cargo / பொதுச் சரக்கு",\n'
             '  "confidence": 0.95,\n'
-            '  "notes": "Verified from both cameras"\n'
+            '  "notes": "Verified from cameras"\n'
             "}\n"
-            "For vehicle_class, pick the closest match from: "
+            "For vehicle_class, pick exact string from: "
             '"🚚 Lorry / லாரி", "🚐 Tempo / டெம்போ", "🛺 Auto / ஆட்டோ", '
-            '"🚜 Tractor / டிராக்டர்", "🚛 Tipper / டிப்பர்", "🚗 Car / Van / இதர". '
-            "Ensure vehicle_no is uppercase, without spaces (e.g., TN33AB1234). If unreadable, return empty string."
+            '"🚜 Tractor / டிராக்டர்", "🚛 Tipper / டிப்பர்", "🚗 Car / Van / இதர".\n'
+            'For load_status, pick exact string: "Loaded / லோடு" or "Empty / காலி".\n'
+            "For material, pick exact string from: "
+            '"General Cargo / பொதுச் சரக்கு", "Sand / மணல்", "Cotton / பருத்தி", "Cement / சிமென்ட்", '
+            '"Maize / மக்காச்சோளம்", "Paddy / நெல்", "Gravel / ஜல்லி", "Iron Scrap / இரும்பு கழிவு", '
+            '"Coconut / தேங்காய்", "Timber / மரம்", "Sugarcane / கரும்பு".\n'
+            "Ensure vehicle_no is uppercase without spaces (e.g., TN33AB1234). If plate is unreadable, return empty string."
         )
 
         parts = [{"text": prompt}]
@@ -108,10 +118,10 @@ class GeminiCloudService:
             }
         }
 
-        # Model fallback chain
+        # Model fallback chain (bypass Tailscale proxy for direct Google API access)
         models = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
         headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=12.0) as client:
+        async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
             for model_name in models:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
                 try:
@@ -128,6 +138,7 @@ class GeminiCloudService:
                             "vehicle_no": clean_no,
                             "vehicle_class": v_class,
                             "vehicle_type": v_class or "Truck",
+                            "load_status": parsed.get("load_status", ""),
                             "material": parsed.get("material", ""),
                             "confidence": float(parsed.get("confidence", 0.9)),
                             "model_used": model_name

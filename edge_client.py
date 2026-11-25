@@ -156,12 +156,17 @@ class EdgeClient:
         except Exception:
             return b""
 
-    async def get_camera_snapshot(self, camera: str = "front", allow_placeholder: bool = True) -> Optional[bytes]:
+    async def get_camera_snapshot(
+        self,
+        camera: str = "front",
+        allow_placeholder: bool = True,
+        force_refresh: bool = False
+    ) -> Optional[bytes]:
         cam_type = "front" if camera in ("front", "both") else "rear"
         now = time.time()
 
         # 1. Check in-memory cache to guarantee ZERO extra load on Home PC
-        if cam_type in self._camera_cache:
+        if not force_refresh and cam_type in self._camera_cache:
             entry = self._camera_cache[cam_type]
             if now - entry["timestamp"] < self._camera_cache_ttl:
                 return entry["bytes"]
@@ -176,7 +181,7 @@ class EdgeClient:
         # Serialize concurrent refreshes per camera so Home PC RTSP isn't hit twice
         async with self._camera_locks[cam_type]:
             now = time.time()
-            if cam_type in self._camera_cache:
+            if not force_refresh and cam_type in self._camera_cache:
                 entry = self._camera_cache[cam_type]
                 if now - entry["timestamp"] < self._camera_cache_ttl:
                     return entry["bytes"]

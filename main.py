@@ -310,11 +310,15 @@ async def api_live_weight():
     return await edge_client.get_live_weight()
 
 @app.get("/api/camera-snapshot")
-async def api_camera_snapshot(camera: str = Query("front", pattern="^(front|rear|both)$")):
+async def api_camera_snapshot(
+    camera: str = Query("front", pattern="^(front|rear|both)$"),
+    refresh: int = Query(0)
+):
     """
-    Fetches snapshot on-demand from Home PC via Tailscale Funnel.
+    Fetches snapshot on-demand from Home PC via Tailscale.
+    Uses 8s in-memory cache unless refresh=1 is requested.
     """
-    img_bytes = await edge_client.get_camera_snapshot(camera=camera)
+    img_bytes = await edge_client.get_camera_snapshot(camera=camera, force_refresh=(refresh == 1))
     if img_bytes:
         return Response(content=img_bytes, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
     
@@ -322,19 +326,19 @@ async def api_camera_snapshot(camera: str = Query("front", pattern="^(front|rear
     return Response(content=b"", media_type="image/jpeg", status_code=404)
 
 @app.post("/api/gemini/detect")
-async def api_gemini_detect():
+async def api_gemini_detect(weight: float = Query(0.0)):
     """
     Triggers Dual-Camera Fusion ANPR using Gemini AI directly in Cloud.
-    Pulls front and rear frames on-demand in parallel from Home PC (no placeholders).
+    Pulls fresh front and rear frames on-demand in parallel from Home PC (no placeholders).
     """
     front_bytes, rear_bytes = await asyncio.gather(
-        edge_client.get_camera_snapshot(camera="front", allow_placeholder=False),
-        edge_client.get_camera_snapshot(camera="rear", allow_placeholder=False)
+        edge_client.get_camera_snapshot(camera="front", allow_placeholder=False, force_refresh=True),
+        edge_client.get_camera_snapshot(camera="rear", allow_placeholder=False, force_refresh=True)
     )
     if not front_bytes and not rear_bytes:
         return {"success": False, "vehicle_no": "", "error": "Cameras offline / Home PC unreachable"}
 
-    res = await gemini_cloud.detect_fusion(front_bytes=front_bytes, rear_bytes=rear_bytes)
+    res = await gemini_cloud.detect_fusion(front_bytes=front_bytes, rear_bytes=rear_bytes, live_weight=weight)
     return res
 
 @app.post("/api/gemini/upload")

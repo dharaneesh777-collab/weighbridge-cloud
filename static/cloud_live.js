@@ -6,7 +6,7 @@ let isScaleStable = true;
 let currentMode = 'double'; // 'double' | 'single'
 let currentStage = '1ST_WEIGHT'; // '1ST_WEIGHT' | '2ND_WEIGHT'
 let firstWeightVal = 0;
-let autoPilotEnabled = false;
+let autoPilotEnabled = (localStorage.getItem('wb_autopilot') !== 'false');
 let autoPilotTriggered = false;
 let autoPilotLastAttempt = 0;
 let initialNextTicketNo = '';
@@ -87,8 +87,8 @@ async function pollLiveWeight() {
             }
         }
 
-        // Auto-Pilot Trigger: Vehicle stably parked (> 500 kg)
-        if (autoPilotEnabled && isScaleStable && currentLiveWeight >= 500) {
+        // Auto-Pilot Trigger: Vehicle stably parked (>= 150 kg while Home PC is online)
+        if (autoPilotEnabled && data.edge_online && isScaleStable && currentLiveWeight >= 150) {
             const vehNo = document.getElementById('vehicle_no')?.value.trim();
             const nowMs = Date.now();
             if (!vehNo && (!autoPilotTriggered || (nowMs - autoPilotLastAttempt > 15000))) {
@@ -96,7 +96,7 @@ async function pollLiveWeight() {
                 autoPilotLastAttempt = nowMs;
                 runGeminiFusionANPR();
             }
-        } else if (currentLiveWeight < 200) {
+        } else if (currentLiveWeight < 50) {
             // Reset trigger when scale is empty
             autoPilotTriggered = false;
             autoPilotLastAttempt = 0;
@@ -141,12 +141,11 @@ function toggleWeighMode(mode) {
     recalcNetWeight();
 }
 
-// AI Auto-Pilot Mode Toggle
-function toggleAutoPilotMode() {
-    autoPilotEnabled = !autoPilotEnabled;
+function applyAutoPilotUI() {
     const led = document.getElementById('autoPilotLed');
     const txt = document.getElementById('autoPilotStatusText');
     const btn = document.getElementById('btnAutoPilotToggle');
+    if (!led || !txt || !btn) return;
 
     if (autoPilotEnabled) {
         led.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse';
@@ -159,6 +158,13 @@ function toggleAutoPilotMode() {
         txt.className = 'text-slate-700';
         btn.className = 'px-3 py-2 rounded-xl text-xs sm:text-sm font-black border transition flex items-center gap-2 bg-slate-100 border-slate-300 text-slate-700 hover:bg-slate-200 shadow-xs';
     }
+}
+
+// AI Auto-Pilot Mode Toggle
+function toggleAutoPilotMode() {
+    autoPilotEnabled = !autoPilotEnabled;
+    localStorage.setItem('wb_autopilot', autoPilotEnabled ? 'true' : 'false');
+    applyAutoPilotUI();
 }
 
 // Load Condition Selector: Loaded vs Empty
@@ -346,7 +352,7 @@ function recalcNetWeight() {
 }
 
 // Refresh Camera Previews (Preload smoothly in background with zero flicker)
-async function refreshCameraPreviews() {
+async function refreshCameraPreviews(forceRefresh = true) {
     if (isRefreshingCameras) return;
     isRefreshingCameras = true;
 
@@ -354,6 +360,7 @@ async function refreshCameraPreviews() {
     if (btn) btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1 text-blue-600"></i> Refreshing...';
 
     const t = Date.now();
+    const rFlag = forceRefresh ? '&refresh=1' : '';
     const front = document.getElementById('frontCameraImg');
     const rear = document.getElementById('rearCameraImg');
 
@@ -371,12 +378,59 @@ async function refreshCameraPreviews() {
     };
 
     await Promise.all([
-        loadImg(front, `/api/camera-snapshot?camera=front&t=${t}`),
-        loadImg(rear, `/api/camera-snapshot?camera=rear&t=${t}`)
+        loadImg(front, `/api/camera-snapshot?camera=front${rFlag}&t=${t}`),
+        loadImg(rear, `/api/camera-snapshot?camera=rear${rFlag}&t=${t}`)
     ]);
 
     if (btn) btn.innerHTML = '<i class="fa-solid fa-arrows-rotate mr-1 text-blue-600"></i> Refresh Feeds';
     isRefreshingCameras = false;
+}
+
+// Shared helper to apply Gemini ANPR & visual inspection result to form + Firestore lookup
+async function applyGeminiDetectionResult(data, prefixLabel = '✨ Auto-Filled') {
+    const feedback = document.getElementById('geminiScanFeedback');
+
+    if (data.success && data.vehicle_no) {
+        const vInput = document.getElementById('vehicle_no');
+        if (vInput) {
+            vInput.value = data.vehicle_no;
+        }
+
+        // Wait for Firestore lookup FIRST so 2nd-weight / past-vehicle state takes precedence
+        await lookupVehicleDetails(data.vehicle_no);
+
+        const isSecondWeight = (currentStage === '2ND_WEIGHT');
+        const detectedClass = data.vehicle_class || data.vehicle_type;
+
+        if (!isSecondWeight && detectedClass && document.getElementById('vehicle_type')) {
+            const vtSelect = document.getElementById('vehicle_type');
+            const matchOpt = Array.from(vtSelect.options).find(o => o.value === detectedClass || o.value.includes(detectedClass));
+            if (matchOpt) vtSelect.value = matchOpt.value;
+        }
+
+        if (!isSecondWeight && data.load_status) {
+            setLoadCondition(data.load_status);
+        } else {
+            updateTariffByVehicleAndLoad();
+        }
+
+        if (!isSecondWeight && data.material && document.getElementById('material')) {
+            const matSelect = document.getElementById('material');
+            const matchMat = Array.from(matSelect.options).find(o => o.value === data.material || o.value.includes(data.material));
+            if (matchMat) matSelect.value = matchMat.value;
+        }
+
+        if (feedback) {
+            const stageNote = isSecondWeight ? '2nd Weight Match' : (data.load_status || '1st Weight');
+            feedback.className = 'mt-2 p-2 rounded-xl text-xs font-bold border border-emerald-300 bg-emerald-50 text-emerald-900 flex items-center justify-between';
+            feedback.innerHTML = `<span>${prefixLabel}: <strong>${data.vehicle_no}</strong> &bull; ${detectedClass || 'Vehicle'} &bull; ${stageNote}</span><button type="button" onclick="this.parentElement.classList.add('hidden')" class="text-emerald-700">&times;</button>`;
+            feedback.classList.remove('hidden');
+        }
+    } else if (feedback) {
+        feedback.className = 'mt-2 p-2 rounded-xl text-xs font-bold border border-amber-300 bg-amber-50 text-amber-900 flex items-center justify-between';
+        feedback.innerHTML = `<span>⚠️ ${data.error || data.message || 'Plate not detected clearly'}. Try manual entry.</span><button type="button" onclick="this.parentElement.classList.add('hidden')" class="text-amber-700">&times;</button>`;
+        feedback.classList.remove('hidden');
+    }
 }
 
 // Gemini Dual-Camera Fusion ANPR
@@ -388,42 +442,12 @@ async function runGeminiFusionANPR() {
     if (feedback) feedback.classList.add('hidden');
 
     try {
-        const res = await fetch('/api/gemini/detect', { method: 'POST' });
+        const res = await fetch(`/api/gemini/detect?weight=${encodeURIComponent(currentLiveWeight)}`, { method: 'POST' });
         const data = await res.json();
 
-        if (data.success && data.vehicle_no) {
-            const vInput = document.getElementById('vehicle_no');
-            if (vInput) {
-                vInput.value = data.vehicle_no;
-                lookupVehicleDetails(data.vehicle_no);
-            }
-            const detectedClass = data.vehicle_class || data.vehicle_type;
-            if (detectedClass && document.getElementById('vehicle_type')) {
-                const vtSelect = document.getElementById('vehicle_type');
-                const matchOpt = Array.from(vtSelect.options).find(o => o.value === detectedClass || o.value.includes(detectedClass));
-                if (matchOpt) {
-                    vtSelect.value = matchOpt.value;
-                    updateTariffByVehicleAndLoad();
-                }
-            }
-            if (data.material && document.getElementById('material')) {
-                const matSelect = document.getElementById('material');
-                const matchMat = Array.from(matSelect.options).find(o => o.value === data.material || o.value.includes(data.material));
-                if (matchMat) matSelect.value = matchMat.value;
-            }
-
-            if (feedback) {
-                feedback.className = 'mt-2 p-2 rounded-xl text-xs font-bold border border-emerald-300 bg-emerald-50 text-emerald-900 flex items-center justify-between';
-                feedback.innerHTML = `<span>✨ Detected: <strong>${data.vehicle_no}</strong> (${detectedClass || 'Vehicle'})</span><button type="button" onclick="this.parentElement.classList.add('hidden')" class="text-emerald-700">&times;</button>`;
-                feedback.classList.remove('hidden');
-            }
-        } else {
-            if (feedback) {
-                feedback.className = 'mt-2 p-2 rounded-xl text-xs font-bold border border-amber-300 bg-amber-50 text-amber-900 flex items-center justify-between';
-                feedback.innerHTML = `<span>⚠️ ${data.error || data.message || 'Plate not detected clearly'}. Try manual entry.</span><button type="button" onclick="this.parentElement.classList.add('hidden')" class="text-amber-700">&times;</button>`;
-                feedback.classList.remove('hidden');
-            }
-        }
+        // Sync camera preview cards with the fresh frames just captured for Gemini (hits 8s cache)
+        refreshCameraPreviews(false);
+        await applyGeminiDetectionResult(data, '✨ Auto-Filled');
     } catch (e) {
         console.warn('Gemini detection error:', e);
     } finally {
@@ -466,23 +490,7 @@ async function handlePhotoUpload(e) {
         formData.append('file', file);
         const res = await fetch('/api/gemini/upload', { method: 'POST', body: formData });
         const data = await res.json();
-
-        if (data.success && data.vehicle_no) {
-            const vInput = document.getElementById('vehicle_no');
-            if (vInput) {
-                vInput.value = data.vehicle_no;
-                lookupVehicleDetails(data.vehicle_no);
-            }
-            if (feedback) {
-                feedback.className = 'mt-2 p-2 rounded-xl text-xs font-bold border border-emerald-300 bg-emerald-50 text-emerald-900 flex items-center justify-between';
-                feedback.innerHTML = `<span>📸 Photo Scan: <strong>${data.vehicle_no}</strong></span><button type="button" onclick="this.parentElement.classList.add('hidden')" class="text-emerald-700">&times;</button>`;
-                feedback.classList.remove('hidden');
-            }
-        } else if (feedback) {
-            feedback.className = 'mt-2 p-2 rounded-xl text-xs font-bold border border-amber-300 bg-amber-50 text-amber-900 flex items-center justify-between';
-            feedback.innerHTML = `<span>⚠️ ${data.error || 'Could not read plate from uploaded photo.'}</span><button type="button" onclick="this.parentElement.classList.add('hidden')" class="text-amber-700">&times;</button>`;
-            feedback.classList.remove('hidden');
-        }
+        await applyGeminiDetectionResult(data, '📸 Photo Scan');
     } catch (err) {
         console.warn('Photo upload scan error:', err);
     } finally {
@@ -651,8 +659,9 @@ async function doConfirmSubmit() {
 window.addEventListener('DOMContentLoaded', () => {
     const serialEl = document.getElementById('serial_no_display');
     if (serialEl) initialNextTicketNo = serialEl.value;
+    applyAutoPilotUI();
     pollLiveWeight();
     if (document.getElementById('frontCameraImg')) {
-        refreshCameraPreviews();
+        refreshCameraPreviews(false);
     }
 });
