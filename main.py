@@ -175,6 +175,10 @@ class VoiceCommandRequest(BaseModel):
     speech: str
     lang: Optional[str] = "mixed"
 
+class TTSRequest(BaseModel):
+    text: str
+    voice: Optional[str] = "Kore"
+
 DEFAULT_MATERIALS = [
     "General Cargo / பொதுச் சரக்கு",
     "Sand / மணல்",
@@ -358,7 +362,7 @@ async def api_gemini_upload(file: UploadFile = File(...)):
     return await gemini_cloud.detect_fusion(front_bytes=img_bytes, rear_bytes=None)
 
 async def _compute_today_metrics_ist(session: Session) -> dict:
-    """Computes today's (IST) weighbridge stats from Firestore or SQL database."""
+    """Computes rich today (IST) stats, pending 1st-weight trucks, material totals & recent history."""
     today_ist_date = datetime.now(IST).date()
     if firestore_store.is_enabled():
         all_tickets = await asyncio.to_thread(firestore_store.list_tickets, 500)
@@ -366,13 +370,39 @@ async def _compute_today_metrics_ist(session: Session) -> dict:
         all_tickets = session.exec(select(CloudTicket).order_by(desc(CloudTicket.id)).limit(500)).all()
 
     today_tickets = []
-    open_count = 0
+    open_trucks = []
+    material_totals = {}
     for t in all_tickets:
-        if t.status == "FIRST_WEIGHT":
-            open_count += 1
+        if t.status == "FIRST_WEIGHT" and len(open_trucks) < 10:
+            open_trucks.append({
+                "ticket_no": t.ticket_no,
+                "vehicle_no": t.vehicle_no,
+                "first_weight_kg": t.first_weight or t.gross_weight or t.tare_weight,
+                "customer": t.customer_name or "",
+                "time_ist": format_ist(t.first_weight_at or t.created_at, "%d-%m %H:%M"),
+            })
         t_ist = to_ist(t.created_at)
         if t_ist and t_ist.date() == today_ist_date:
             today_tickets.append(t)
+            mat_name = (t.material or "General Cargo").split("/")[0].strip()
+            bucket = material_totals.setdefault(mat_name, {"count": 0, "net_kg": 0.0, "revenue_rs": 0.0})
+            bucket["count"] += 1
+            bucket["net_kg"] += (t.net_weight or 0.0)
+            bucket["revenue_rs"] += (t.charge or 0.0)
+
+    recent_tickets = [
+        {
+            "ticket_no": t.ticket_no,
+            "vehicle_no": t.vehicle_no,
+            "customer": t.customer_name or "",
+            "material": (t.material or "").split("/")[0].strip(),
+            "net_kg": t.net_weight,
+            "charge_rs": t.charge,
+            "status": t.status,
+            "time_ist": format_ist(t.second_weight_at or t.created_at, "%d-%m %H:%M"),
+        }
+        for t in all_tickets[:15]
+    ]
 
     total_net_kg = sum((t.net_weight or 0.0) for t in today_tickets)
     total_revenue = sum((t.charge or 0.0) for t in today_tickets)
@@ -380,11 +410,27 @@ async def _compute_today_metrics_ist(session: Session) -> dict:
         "date_ist": today_ist_date.strftime("%d-%m-%Y"),
         "today_tickets_count": len(today_tickets),
         "today_completed_count": sum(1 for t in today_tickets if t.status == "COMPLETED"),
-        "today_open_count": open_count,
+        "today_open_count": len(open_trucks),
         "today_total_net_kg": round(total_net_kg, 1),
         "today_total_net_tons": round(total_net_kg / 1000.0, 2),
         "today_total_revenue_rs": round(total_revenue, 2),
+        "material_breakdown_today": material_totals,
+        "pending_first_weight_trucks": open_trucks,
+        "recent_tickets": recent_tickets,
     }
+
+@app.post("/api/gemini/tts")
+async def api_gemini_tts(req: TTSRequest):
+    """
+    Synthesizes audible Tamil/English Neural Speech audio (WAV base64) via Gemini TTS
+    so voice responses work reliably even when the OS lacks Tamil voices.
+    """
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    if len(text) > 500:
+        text = text[:500]
+    return await gemini_cloud.synthesize_speech(text=text, voice_name=req.voice or "Kore")
 
 @app.post("/api/gemini/voice_command")
 async def api_gemini_voice_command(

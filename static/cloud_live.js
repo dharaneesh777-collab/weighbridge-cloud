@@ -160,11 +160,15 @@ function applyAutoPilotUI() {
     }
 }
 
-// AI Auto-Pilot Mode Toggle
-function toggleAutoPilotMode() {
-    autoPilotEnabled = !autoPilotEnabled;
+function setAutoPilotMode(enabled) {
+    autoPilotEnabled = Boolean(enabled);
     localStorage.setItem('wb_autopilot', autoPilotEnabled ? 'true' : 'false');
     applyAutoPilotUI();
+}
+
+// AI Auto-Pilot Mode Toggle
+function toggleAutoPilotMode() {
+    setAutoPilotMode(!autoPilotEnabled);
 }
 
 // Load Condition Selector: Loaded vs Empty
@@ -488,16 +492,26 @@ function resetCloudWeighForm() {
         const el = document.getElementById(id);
         if (el) el.value = '';
     });
+    const vtEl = document.getElementById('vehicle_type');
+    if (vtEl && vtEl.options.length > 0) vtEl.selectedIndex = 0;
+    const matEl = document.getElementById('material');
+    if (matEl && matEl.options.length > 0) matEl.selectedIndex = 0;
     document.getElementById('storedTareBox')?.classList.add('hidden');
     document.getElementById('geminiScanFeedback')?.classList.add('hidden');
     if (typeof startFreshTicket === 'function') {
         startFreshTicket();
     }
     setLoadCondition('Loaded / லோடு');
+    updateTariffByVehicleAndLoad();
     const cpEl = document.getElementById('copies');
     if (cpEl) cpEl.value = '1';
     autoPilotTriggered = false;
     autoPilotLastAttempt = 0;
+}
+
+async function reprintTicketNo(ticketNo) {
+    const res = await fetch(`/api/ticket/reprint?ticket_no=${encodeURIComponent(ticketNo)}`, { method: 'POST' });
+    return await res.json();
 }
 
 // Photo Upload Scan

@@ -1,18 +1,53 @@
 /**
  * Smart Bilingual Gemini Voice Assistant (Tamil, English & Tanglish)
- * for Weighbridge Cloud Portal
+ * - Hybrid Audible Neural Voice (Gemini 3.8 Neural TTS audio/wav + Browser SpeechSynthesis fallback)
+ * - Synchronous browser audio unlock so async AI replies always play aloud
+ * - Full hands-free weighbridge control + Live IST Firestore Copilot
  */
 (function () {
   'use strict';
 
+  const SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+  const ttsAudioCache = new Map();
+
   let recognition = null;
   let isListening = false;
   let ttsEnabled = true;
-  let selectedLang = localStorage.getItem('wb_voice_lang') || 'auto'; // 'auto' | 'en-IN' | 'ta-IN'
+  let hdNeuralVoice = (localStorage.getItem('wb_hd_voice') !== 'false');
+  let selectedLang = localStorage.getItem('wb_voice_lang') || 'auto';
+  let sharedAudioPlayer = null;
+  let audioUnlocked = false;
+  let lastSpokenText = '';
 
   window.addEventListener('DOMContentLoaded', () => {
+    sharedAudioPlayer = new Audio();
+    sharedAudioPlayer.preload = 'auto';
+    if (window.speechSynthesis && typeof window.speechSynthesis.getVoices === 'function') {
+      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+    }
     initVoiceAssistant();
   });
+
+  function unlockBrowserAudio() {
+    if (audioUnlocked) return;
+    try {
+      if (!sharedAudioPlayer) sharedAudioPlayer = new Audio();
+      sharedAudioPlayer.src = SILENT_WAV;
+      const p = sharedAudioPlayer.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => {
+          sharedAudioPlayer.pause();
+          audioUnlocked = true;
+        }).catch(() => {});
+      }
+      if (window.speechSynthesis) {
+        const u = new SpeechSynthesisUtterance('');
+        u.volume = 0;
+        window.speechSynthesis.speak(u);
+      }
+    } catch (_) {}
+  }
 
   function initVoiceAssistant() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -53,7 +88,7 @@
         isListening = false;
         updateUIListening(false);
         if (event.error === 'not-allowed') {
-          showVoiceToast('⚠️ Mic blocked. Use text box below or allow mic permission.', 'error');
+          showVoiceToast('⚠️ Mic blocked. Type command below or allow mic permission.', 'error');
         } else if (event.error !== 'no-speech') {
           showVoiceToast(`Mic note: ${event.error}`, 'warning');
         }
@@ -70,6 +105,7 @@
     window.addEventListener('keydown', (e) => {
       if (e.altKey && (e.key === 'v' || e.key === 'V')) {
         e.preventDefault();
+        unlockBrowserAudio();
         toggleVoiceTrayAndListen(supported);
       }
     });
@@ -84,22 +120,25 @@
 
     container.innerHTML = `
       <div id="geminiVoiceTray" class="hidden w-80 sm:w-96 bg-slate-900/95 backdrop-blur-md text-white rounded-2xl shadow-2xl border border-slate-700/80 p-4 transition-all duration-200">
-        <div class="flex items-center justify-between border-b border-slate-800 pb-2.5 mb-2.5">
-          <div class="flex items-center gap-2">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-2.5 mb-2.5 gap-1">
+          <div class="flex items-center gap-1.5">
             <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
             <span class="font-black text-sm tracking-wide text-transparent bg-clip-text bg-gradient-to-r from-violet-400 to-indigo-300">
               Gemini Voice AI
             </span>
-            <span class="text-[10px] bg-indigo-950 text-indigo-300 border border-indigo-700/50 px-1.5 py-0.5 rounded-md font-semibold">EN / தமிழ்</span>
           </div>
 
-          <div class="flex items-center gap-1.5">
-            <select id="geminiVoiceLangSelect" class="bg-slate-800 text-[11px] font-bold text-slate-200 rounded-lg px-2 py-1 border border-slate-700 outline-none cursor-pointer">
-              <option value="auto">🌐 Auto (தமிழ்/EN)</option>
+          <div class="flex items-center gap-1">
+            <select id="geminiVoiceLangSelect" class="bg-slate-800 text-[11px] font-bold text-slate-200 rounded-lg px-1.5 py-1 border border-slate-700 outline-none cursor-pointer">
+              <option value="auto">🌐 Auto</option>
               <option value="ta-IN">🇮🇳 தமிழ்</option>
-              <option value="en-IN">🇬🇧 English</option>
+              <option value="en-IN">🇬🇧 EN</option>
             </select>
-            <button id="geminiVoiceTtsBtn" type="button" title="Toggle Spoken Feedback" class="p-1 rounded-lg hover:bg-slate-800 text-slate-300 hover:text-white transition text-xs cursor-pointer">
+            <button id="geminiVoiceHdBtn" type="button" title="Toggle Gemini HD Neural Tamil/English Voice"
+                    class="px-1.5 py-1 rounded-lg text-[10px] font-black border cursor-pointer transition">
+              HD
+            </button>
+            <button id="geminiVoiceTtsBtn" type="button" title="Mute / Unmute Voice" class="p-1 rounded-lg hover:bg-slate-800 text-slate-300 hover:text-white transition text-xs cursor-pointer">
               🔊
             </button>
             <button id="geminiVoiceCloseBtn" type="button" title="Close" class="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition text-xs cursor-pointer">
@@ -108,17 +147,24 @@
           </div>
         </div>
 
-        <div class="bg-slate-950/75 rounded-xl p-3 border border-slate-800/80 min-h-[56px] flex flex-col justify-center">
-          <div id="geminiVoiceStatus" class="text-xs text-slate-300 font-medium">
-            ${supported ? 'Click mic or type a command in Tamil / English / Tanglish...' : 'Mic unavailable here — type a Tamil / English command below'}
+        <div class="bg-slate-950/75 rounded-xl p-3 border border-slate-800/80 min-h-[60px] flex flex-col justify-center">
+          <div class="flex items-start justify-between gap-2">
+            <div id="geminiVoiceStatus" class="text-xs text-slate-300 font-medium flex-1">
+              ${supported ? 'Click mic or type in Tamil / English / Tanglish...' : 'Mic unavailable here — type a Tamil / English command below'}
+            </div>
+            <button id="geminiVoiceReplayBtn" type="button" title="Replay spoken response"
+                    class="hidden shrink-0 px-2 py-1 rounded-lg bg-slate-800 hover:bg-indigo-600 text-[10px] font-bold text-slate-200 border border-slate-700 cursor-pointer transition">
+              🔊 Play
+            </button>
           </div>
           <div id="geminiVoiceActionPill" class="hidden mt-2 text-[11px] font-bold px-2 py-1 rounded-md"></div>
+          <div id="geminiVoiceAudioBadge" class="hidden mt-1.5 text-[10px] text-indigo-300 font-semibold"></div>
         </div>
 
-        <!-- Direct Bilingual Command Input (useful in noisy cabs or mic-less devices) -->
+        <!-- Direct Bilingual Command Input -->
         <form id="geminiVoiceTextForm" class="mt-2.5 flex items-center gap-1.5">
           <input id="geminiVoiceTextInput" type="text" autocomplete="off"
-                 placeholder="Type command (e.g. TN33AB1234 மணல் 2 copies)"
+                 placeholder="Speak or type (e.g. TN33AB1234 மணல் 2 copies)"
                  class="flex-1 bg-slate-800/90 text-white placeholder-slate-400 text-xs px-3 py-2 rounded-xl border border-slate-700 focus:border-indigo-400 outline-none">
           <button id="geminiVoiceSendBtn" type="submit"
                   class="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black transition cursor-pointer">
@@ -126,12 +172,13 @@
           </button>
         </form>
 
-        <!-- Clickable Sample Commands -->
+        <!-- Clickable Powerful Sample Commands -->
         <div class="mt-2.5 pt-2 border-t border-slate-800/80 text-[10px] text-slate-400 flex flex-wrap gap-1.5">
           <span class="text-slate-500 font-semibold">Try:</span>
           <button type="button" class="voice-cmd-sample hover:text-indigo-300 bg-slate-800/70 hover:bg-slate-800 px-1.5 py-0.5 rounded cursor-pointer transition">TN33AB1234 Murugan மணல் 2 copies</button>
           <button type="button" class="voice-cmd-sample hover:text-indigo-300 bg-slate-800/70 hover:bg-slate-800 px-1.5 py-0.5 rounded cursor-pointer transition">இன்றைய கலெக்ஷன் எவ்வளவு?</button>
           <button type="button" class="voice-cmd-sample hover:text-indigo-300 bg-slate-800/70 hover:bg-slate-800 px-1.5 py-0.5 rounded cursor-pointer transition">எடை எவ்வளவு?</button>
+          <button type="button" class="voice-cmd-sample hover:text-indigo-300 bg-slate-800/70 hover:bg-slate-800 px-1.5 py-0.5 rounded cursor-pointer transition">Pending 1st weight trucks?</button>
           <button type="button" class="voice-cmd-sample hover:text-indigo-300 bg-slate-800/70 hover:bg-slate-800 px-1.5 py-0.5 rounded cursor-pointer transition">கேமரா ஸ்கேன்</button>
           <button type="button" class="voice-cmd-sample hover:text-indigo-300 bg-slate-800/70 hover:bg-slate-800 px-1.5 py-0.5 rounded cursor-pointer transition">Clear form</button>
         </div>
@@ -152,13 +199,17 @@
     const tray = document.getElementById('geminiVoiceTray');
     const closeBtn = document.getElementById('geminiVoiceCloseBtn');
     const ttsBtn = document.getElementById('geminiVoiceTtsBtn');
+    const hdBtn = document.getElementById('geminiVoiceHdBtn');
+    const replayBtn = document.getElementById('geminiVoiceReplayBtn');
     const langSelect = document.getElementById('geminiVoiceLangSelect');
     const textForm = document.getElementById('geminiVoiceTextForm');
     const textInput = document.getElementById('geminiVoiceTextInput');
 
     if (langSelect) langSelect.value = selectedLang;
+    updateHdButtonUI();
 
     fab.addEventListener('click', () => {
+      unlockBrowserAudio();
       toggleVoiceTrayAndListen(supported);
     });
 
@@ -168,9 +219,25 @@
     });
 
     ttsBtn.addEventListener('click', () => {
+      unlockBrowserAudio();
       ttsEnabled = !ttsEnabled;
       ttsBtn.textContent = ttsEnabled ? '🔊' : '🔇';
-      ttsBtn.title = ttsEnabled ? 'Spoken Feedback ON' : 'Spoken Feedback OFF';
+      ttsBtn.title = ttsEnabled ? 'Voice ON' : 'Voice Muted';
+      if (!ttsEnabled && sharedAudioPlayer) {
+        sharedAudioPlayer.pause();
+      }
+    });
+
+    hdBtn.addEventListener('click', () => {
+      unlockBrowserAudio();
+      hdNeuralVoice = !hdNeuralVoice;
+      localStorage.setItem('wb_hd_voice', hdNeuralVoice ? 'true' : 'false');
+      updateHdButtonUI();
+    });
+
+    replayBtn.addEventListener('click', () => {
+      unlockBrowserAudio();
+      if (lastSpokenText) speakResponse(lastSpokenText);
     });
 
     langSelect.addEventListener('change', (e) => {
@@ -180,6 +247,7 @@
 
     textForm.addEventListener('submit', (e) => {
       e.preventDefault();
+      unlockBrowserAudio();
       const cmd = (textInput.value || '').trim();
       if (!cmd) return;
       textInput.value = '';
@@ -188,10 +256,23 @@
 
     container.querySelectorAll('.voice-cmd-sample').forEach((btn) => {
       btn.addEventListener('click', () => {
+        unlockBrowserAudio();
         const cmd = (btn.textContent || '').trim();
         if (cmd) handleUserSpeech(cmd);
       });
     });
+  }
+
+  function updateHdButtonUI() {
+    const hdBtn = document.getElementById('geminiVoiceHdBtn');
+    if (!hdBtn) return;
+    if (hdNeuralVoice) {
+      hdBtn.className = 'px-1.5 py-1 rounded-lg text-[10px] font-black border cursor-pointer transition bg-indigo-600/80 text-white border-indigo-400';
+      hdBtn.textContent = 'HD ON';
+    } else {
+      hdBtn.className = 'px-1.5 py-1 rounded-lg text-[10px] font-black border cursor-pointer transition bg-slate-800 text-slate-400 border-slate-700';
+      hdBtn.textContent = 'HD OFF';
+    }
   }
 
   function openVoiceTray() {
@@ -250,8 +331,20 @@
   function setVoiceStatusText(text, colorClass = 'text-slate-300') {
     const el = document.getElementById('geminiVoiceStatus');
     if (el) {
-      el.className = `text-xs font-medium ${colorClass}`;
+      el.className = `text-xs font-medium flex-1 ${colorClass}`;
       el.textContent = text;
+    }
+  }
+
+  function setAudioBadge(msg) {
+    const el = document.getElementById('geminiVoiceAudioBadge');
+    if (!el) return;
+    if (!msg) {
+      el.classList.add('hidden');
+      el.textContent = '';
+    } else {
+      el.textContent = msg;
+      el.classList.remove('hidden');
     }
   }
 
@@ -273,26 +366,104 @@
     setVoiceStatusText(msg, cls);
   }
 
-  function speakResponse(text) {
-    if (!ttsEnabled || !window.speechSynthesis || !text) return;
+  function hasNativeVoiceForLang(isTamil) {
+    if (!window.speechSynthesis || typeof window.speechSynthesis.getVoices !== 'function') return false;
+    const voices = window.speechSynthesis.getVoices() || [];
+    if (isTamil) {
+      return voices.some((v) => v.lang && v.lang.toLowerCase().startsWith('ta'));
+    }
+    return voices.some((v) => v.lang && v.lang.toLowerCase().startsWith('en'));
+  }
+
+  function playNativeSpeech(text, isTamil) {
+    if (!window.speechSynthesis) return false;
     try {
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 1.02;
-      const hasTamil = /[\u0B80-\u0BFF]/.test(text);
-      utterance.lang = hasTamil ? 'ta-IN' : 'en-IN';
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        const match = voices.find((v) => hasTamil ? v.lang.startsWith('ta') : (v.lang.startsWith('en-IN') || v.lang.startsWith('en')));
-        if (match) utterance.voice = match;
-      }
+      utterance.lang = isTamil ? 'ta-IN' : 'en-IN';
+      const voices = window.speechSynthesis.getVoices() || [];
+      const match = voices.find((v) => isTamil ? v.lang.toLowerCase().startsWith('ta') : (v.lang.toLowerCase().startsWith('en-in') || v.lang.toLowerCase().startsWith('en')));
+      if (match) utterance.voice = match;
       window.speechSynthesis.speak(utterance);
-    } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function playDataUrlAudio(dataUrl) {
+    if (!sharedAudioPlayer) sharedAudioPlayer = new Audio();
+    sharedAudioPlayer.pause();
+    sharedAudioPlayer.src = dataUrl;
+    sharedAudioPlayer.volume = 1.0;
+    try {
+      await sharedAudioPlayer.play();
+      return true;
+    } catch (err) {
+      console.warn('Audio playback blocked:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Guaranteed Audible Hybrid Speech Engine:
+   * - Uses Gemini Neural TTS (audio/wav) whenever HD is ON or OS lacks a matching voice (fixes silent Windows/Chrome Tamil!)
+   * - Caches audio in memory for instant replay
+   */
+  async function speakResponse(text) {
+    if (!text) return;
+    lastSpokenText = text;
+    const replayBtn = document.getElementById('geminiVoiceReplayBtn');
+    if (replayBtn) replayBtn.classList.remove('hidden');
+
+    if (!ttsEnabled) {
+      setAudioBadge('🔇 Voice muted');
+      return;
+    }
+
+    const isTamil = /[\u0B80-\u0BFF]/.test(text);
+    const shouldUseNeural = hdNeuralVoice || !hasNativeVoiceForLang(isTamil);
+
+    if (shouldUseNeural) {
+      try {
+        if (ttsAudioCache.has(text)) {
+          setAudioBadge('🔊 Playing Gemini Neural Voice...');
+          const ok = await playDataUrlAudio(ttsAudioCache.get(text));
+          setAudioBadge(ok ? '🔊 Gemini Neural Voice played' : '⚠️ Click "🔊 Play" above to hear audio');
+          if (ok) return;
+        } else {
+          setAudioBadge('🔊 Generating Gemini Tamil/EN voice...');
+          const resp = await fetch('/api/gemini/tts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: text, voice: 'Kore' })
+          });
+          if (resp.ok) {
+            const ttsData = await resp.json();
+            if (ttsData.success && ttsData.audio_b64) {
+              const dataUrl = `data:${ttsData.mime_type || 'audio/wav'};base64,${ttsData.audio_b64}`;
+              if (ttsAudioCache.size > 40) ttsAudioCache.clear();
+              ttsAudioCache.set(text, dataUrl);
+              const ok = await playDataUrlAudio(dataUrl);
+              setAudioBadge(ok ? `🔊 Playing (${ttsData.model_used || 'Gemini TTS'})` : '⚠️ Browser blocked autoplay — click "🔊 Play"');
+              if (ok) return;
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Gemini Neural TTS fallback to browser speechSynthesis:', err);
+      }
+    }
+
+    const nativeOk = playNativeSpeech(text, isTamil);
+    setAudioBadge(nativeOk ? '🔊 Browser voice spoken' : '🔇 No audio output available');
   }
 
   async function handleUserSpeech(speech) {
     if (!speech) return;
     openVoiceTray();
+    setAudioBadge('');
     setVoiceStatusText(`Analyzing: "${speech}"...`, 'text-amber-300');
     const icon = document.getElementById('geminiVoiceIcon');
     if (icon) icon.textContent = '⏳';
@@ -360,10 +531,31 @@
         ? Math.round(window.getCloudLiveWeight())
         : parseInt(document.getElementById('formCurrentWeight')?.value || '0', 10);
       const isTamil = /[\u0B80-\u0BFF]/.test(spoken);
-      const wtReply = isTamil ? `தற்போதைய எடை ${cleanWt} கிலோ.` : `Current weight is ${cleanWt} kilograms.`;
+      const wtReply = isTamil ? `தற்போதைய எடை ${cleanWt} கிலோ.` : `Current live weight is ${cleanWt} kilograms.`;
       setVoiceStatusText(`⚖️ Live Scale: ${cleanWt.toLocaleString('en-IN')} Kg`, 'text-emerald-300');
       showActionPill(`Live Weight: ${cleanWt.toLocaleString('en-IN')} Kg`, 'success');
       speakResponse(wtReply);
+      return;
+    }
+
+    if (action === 'refresh_cameras') {
+      speakResponse(spoken);
+      setVoiceStatusText('📷 Refreshing Front & Rear Cameras...', 'text-blue-300');
+      showActionPill('Refreshing live camera feeds', 'info');
+      if (typeof window.refreshCameraPreviews === 'function') {
+        await window.refreshCameraPreviews(true);
+      }
+      return;
+    }
+
+    if (action === 'toggle_autopilot') {
+      speakResponse(spoken);
+      const targetState = (res.autopilot_state === true || String(res.autopilot_state).toLowerCase() === 'true');
+      if (typeof window.setAutoPilotMode === 'function') {
+        window.setAutoPilotMode(targetState);
+      }
+      setVoiceStatusText(`🤖 AI Auto-Pilot ${targetState ? 'ON' : 'OFF'}`, 'text-emerald-300');
+      showActionPill(`AI Auto-Pilot turned ${targetState ? 'ON' : 'OFF'}`, 'success');
       return;
     }
 
@@ -383,10 +575,37 @@
       speakResponse(spoken);
       if (typeof window.handleSaveWeighClick === 'function') {
         setVoiceStatusText('🖨️ Opening Pre-Print Verification...', 'text-emerald-300');
-        showActionPill('Verifying slip before print', 'success');
+        showActionPill('Verify slip & say "Confirm print"', 'success');
         window.handleSaveWeighClick();
       } else {
         showActionPill('Navigate to Weigh Scale page to save', 'warning');
+      }
+      return;
+    }
+
+    if (action === 'confirm_print') {
+      const modal = document.getElementById('confirmSaveModal');
+      if (modal && !modal.classList.contains('hidden') && typeof window.doConfirmSubmit === 'function') {
+        speakResponse(spoken);
+        setVoiceStatusText('🖨️ Saving & Printing to Epson L3350...', 'text-emerald-300');
+        showActionPill('Print job sent to Epson L3350', 'success');
+        await window.doConfirmSubmit();
+      } else {
+        speakResponse('Please review details first.');
+        if (typeof window.handleSaveWeighClick === 'function') {
+          window.handleSaveWeighClick();
+          showActionPill('Verification modal opened — confirm to print', 'info');
+        }
+      }
+      return;
+    }
+
+    if (action === 'reprint_ticket' && res.ticket_no) {
+      speakResponse(spoken);
+      setVoiceStatusText(`🖨️ Reprinting Ticket #${res.ticket_no}...`, 'text-emerald-300');
+      if (typeof window.reprintTicketNo === 'function') {
+        const r = await window.reprintTicketNo(res.ticket_no);
+        showActionPill(r.message || `Reprint #${res.ticket_no} sent`, r.success ? 'success' : 'warning');
       }
       return;
     }
@@ -406,7 +625,7 @@
       const dest = res.navigate_to === '/tickets' ? '/tickets' : '/';
       setVoiceStatusText(`🚀 Opening ${dest}...`, 'text-blue-300');
       showActionPill(`Navigating to ${dest}`, 'info');
-      setTimeout(() => { window.location.href = dest; }, 600);
+      setTimeout(() => { window.location.href = dest; }, 700);
       return;
     }
 
@@ -468,6 +687,14 @@
         if (matchedMat) filled.push(`Material: ${matchedMat}`);
       }
 
+      if (res.charge !== null && res.charge !== undefined) {
+        const chEl = document.getElementById('charge');
+        if (chEl) {
+          chEl.value = String(res.charge);
+          filled.push(`Charge: ₹${res.charge}`);
+        }
+      }
+
       if (res.copies) {
         const cpEl = document.getElementById('copies');
         if (cpEl) {
@@ -497,6 +724,12 @@
     showActionPill(spoken, 'info');
   }
 
-  window.toggleGeminiVoiceAssistant = () => toggleVoiceTrayAndListen(Boolean(recognition));
-  window.runBilingualVoiceTextCommand = handleUserSpeech;
+  window.toggleGeminiVoiceAssistant = () => {
+    unlockBrowserAudio();
+    toggleVoiceTrayAndListen(Boolean(recognition));
+  };
+  window.runBilingualVoiceTextCommand = (cmd) => {
+    unlockBrowserAudio();
+    return handleUserSpeech(cmd);
+  };
 })();
