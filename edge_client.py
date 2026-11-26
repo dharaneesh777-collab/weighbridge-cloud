@@ -87,43 +87,49 @@ class EdgeClient:
         if not force_refresh and (now - self._last_fetch_time < self._cache_ttl_sec):
             return self._cached_weight
 
-        # Primary: query known working weight endpoint directly in 1 fast round-trip
-        target_url = f"{EDGE_URL}{self._working_weight_endpoint}"
-        try:
-            res = await self._scale_client.get(target_url, headers=self._headers())
-            if res.status_code == 200:
-                self._consecutive_weight_failures = 0
-                self._has_connected_once = True
-                content_type = res.headers.get("content-type", "")
-                if "application/json" in content_type:
-                    data = res.json()
-                    self._cached_weight = {
-                        "weight": float(data.get("weight", 0.0)),
-                        "is_stable": bool(data.get("is_stable", False)),
-                        "status_label": data.get("status_label", "ONLINE (LIVE)"),
-                        "edge_online": True,
-                        "timestamp": now
-                    }
-                else:
-                    text = res.text
-                    weight_match = re.search(r'data-weight=["\']([^"\']+)["\']', text)
-                    stable_match = re.search(r'data-stable=["\']([^"\']+)["\']', text)
-                    w = float(weight_match.group(1)) if weight_match else 0.0
-                    s = (stable_match.group(1).lower() in ("true", "1")) if stable_match else False
-                    self._cached_weight = {
-                        "weight": w,
-                        "is_stable": s,
-                        "status_label": "ONLINE (LIVE)",
-                        "edge_online": True,
-                        "timestamp": now
-                    }
-                self._last_fetch_time = now
-                return self._cached_weight
-            elif res.status_code == 404:
-                # Switch working endpoint to the other candidate
-                self._working_weight_endpoint = "/api/edge/live-weight" if self._working_weight_endpoint == "/api/live-weight" else "/api/live-weight"
-        except Exception:
-            pass
+        # Try current working endpoint, falling back immediately on 404 within the same call
+        candidates = [
+            self._working_weight_endpoint,
+            "/api/live-weight" if self._working_weight_endpoint != "/api/live-weight" else "/api/edge/live-weight",
+        ]
+        for ep in candidates:
+            target_url = f"{EDGE_URL}{ep}"
+            try:
+                res = await self._scale_client.get(target_url, headers=self._headers())
+                if res.status_code == 200:
+                    self._working_weight_endpoint = ep
+                    self._consecutive_weight_failures = 0
+                    self._has_connected_once = True
+                    content_type = res.headers.get("content-type", "")
+                    if "application/json" in content_type:
+                        data = res.json()
+                        self._cached_weight = {
+                            "weight": float(data.get("weight", 0.0)),
+                            "is_stable": bool(data.get("is_stable", False)),
+                            "status_label": data.get("status_label", "ONLINE (LIVE)"),
+                            "edge_online": True,
+                            "timestamp": now
+                        }
+                    else:
+                        text = res.text
+                        weight_match = re.search(r'data-weight=["\']([^"\']+)["\']', text)
+                        stable_match = re.search(r'data-stable=["\']([^"\']+)["\']', text)
+                        w = float(weight_match.group(1)) if weight_match else 0.0
+                        s = (stable_match.group(1).lower() in ("true", "1")) if stable_match else False
+                        scale_off = ("weight-offline" in text)
+                        self._cached_weight = {
+                            "weight": w,
+                            "is_stable": s,
+                            "status_label": "SCALE_OFFLINE" if scale_off else "ONLINE (LIVE)",
+                            "edge_online": True,
+                            "timestamp": now
+                        }
+                    self._last_fetch_time = now
+                    return self._cached_weight
+                elif res.status_code == 404:
+                    continue
+            except Exception:
+                break
 
         # Debounce only after we've connected at least once; on cold boot report offline immediately
         self._consecutive_weight_failures += 1
@@ -144,7 +150,8 @@ class EdgeClient:
             draw.rectangle([(20, 20), (620, 340)], outline=(71, 85, 105), width=2)
             label = f"CAM {cam_type.upper()} • {reason}"
             try:
-                font = ImageFont.load_default(size=22)
+                font_size = 18 if len(label) > 34 else 22
+                font = ImageFont.load_default(size=font_size)
             except TypeError:
                 font = ImageFont.load_default()
             bbox = draw.textbbox((0, 0), label, font=font)
@@ -187,6 +194,7 @@ class EdgeClient:
                     return entry["bytes"]
 
             # 2. Query Home PC camera test endpoint (returns high-res JPEG base64)
+            cam_err_reason = "STANDBY"
             url = f"{EDGE_URL}/api/camera/test?type={cam_type}"
             try:
                 res = await self._camera_client.get(url, headers=self._headers(), timeout=7.0)
@@ -200,22 +208,26 @@ class EdgeClient:
                             "timestamp": now
                         }
                         return img_bytes
+                    err_txt = str(data.get("error", ""))
+                    ip_m = re.search(r"(\d+\.\d+\.\d+\.\d+:\d+)", err_txt)
+                    cam_err_reason = f"RTSP UNREACHABLE ({ip_m.group(1)})" if ip_m else "CAMERA OFFLINE"
             except Exception:
                 pass
 
-            # 3. Fallback: Edge snapshot endpoint
-            try:
-                edge_url = f"{EDGE_URL}/api/edge/camera/snapshot?camera={cam_type}"
-                res = await self._camera_client.get(edge_url, headers=self._headers(), timeout=5.0)
-                if res.status_code == 200 and res.headers.get("content-type", "").startswith("image/"):
-                    img_bytes = res.content
-                    self._camera_cache[cam_type] = {
-                        "bytes": img_bytes,
-                        "timestamp": now
-                    }
-                    return img_bytes
-            except Exception:
-                pass
+            # 3. Fallback: Edge snapshot endpoint (skip if camera/test already reported definitive LAN failure)
+            if cam_err_reason == "STANDBY":
+                try:
+                    edge_url = f"{EDGE_URL}/api/edge/camera/snapshot?camera={cam_type}"
+                    res = await self._camera_client.get(edge_url, headers=self._headers(), timeout=5.0)
+                    if res.status_code == 200 and res.headers.get("content-type", "").startswith("image/"):
+                        img_bytes = res.content
+                        self._camera_cache[cam_type] = {
+                            "bytes": img_bytes,
+                            "timestamp": now
+                        }
+                        return img_bytes
+                except Exception:
+                    pass
 
             # 4. Fallback to existing cached frame (up to 120s) to prevent black standby during network glitches
             if cam_type in self._camera_cache and self._camera_cache[cam_type].get("bytes"):
@@ -224,7 +236,7 @@ class EdgeClient:
 
         # 5. Fallback placeholder (clean visual image, zero broken icons)
         if allow_placeholder:
-            return self._generate_placeholder(cam_type, "STANDBY")
+            return self._generate_placeholder(cam_type, cam_err_reason)
         return None
 
     async def print_slip(
