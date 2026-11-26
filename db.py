@@ -46,6 +46,17 @@ class CloudTicket(SQLModel, table=True):
     printed_at: Optional[datetime] = None
     remarks: Optional[str] = Field(default="")
 
+class CloudUser(SQLModel, table=True):
+    __tablename__ = "cloud_users"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    username: str = Field(index=True, unique=True)
+    full_name: str = Field(default="")
+    role: str = Field(default="operator")  # "admin" or "operator"
+    password_hash: str
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=get_utc_now)
+
 def init_cloud_db():
     SQLModel.metadata.create_all(engine)
     # Safely add any new columns to an existing cloud_tickets table
@@ -79,3 +90,22 @@ def get_next_cloud_ticket_number(session: Session) -> int:
     statement = select(func.max(CloudTicket.ticket_no))
     max_no = session.exec(statement).first()
     return (max_no or 1000) + 1
+
+def seed_initial_admin_sql():
+    try:
+        from cloud_app.auth import hash_password
+    except ImportError:
+        from auth import hash_password
+    with Session(engine) as session:
+        existing = session.exec(select(CloudUser).where(CloudUser.username == "admin")).first()
+        if not existing:
+            init_pw = os.getenv("ADMIN_INITIAL_PASSWORD", "Admin@1234").strip()
+            admin = CloudUser(
+                username="admin",
+                full_name="Administrator",
+                role="admin",
+                password_hash=hash_password(init_pw),
+                is_active=True,
+            )
+            session.add(admin)
+            session.commit()

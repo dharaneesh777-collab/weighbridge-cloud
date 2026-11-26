@@ -59,7 +59,7 @@
             </div>
 
             <!-- Navigation Tabs -->
-            <nav class="flex items-center space-x-2">
+            <nav class="flex flex-wrap items-center gap-2">
                 <a href="/" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-extrabold transition flex items-center gap-1.5 {% if active_page == 'weigh' %}bg-blue-600 text-white shadow-md{% else %}text-slate-600 hover:bg-slate-100 hover:text-slate-900 border border-slate-200{% endif %}">
                     <i class="fa-solid fa-scale-balanced"></i>
                     <span>Weigh Scale / எடை</span>
@@ -68,6 +68,19 @@
                     <i class="fa-solid fa-receipt"></i>
                     <span>Tickets / பதிவுகள்</span>
                 </a>
+                {% if current_user and current_user.role == 'admin' %}
+                <a href="/users" class="px-3.5 py-2 rounded-xl text-xs sm:text-sm font-extrabold transition flex items-center gap-1.5 {% if active_page == 'users' %}bg-indigo-600 text-white shadow-md{% else %}text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200{% endif %}">
+                    <i class="fa-solid fa-users-gear"></i>
+                    <span>Users</span>
+                </a>
+                {% endif %}
+                {% if current_user %}
+                <a href="/logout" title="Logged in as {{ current_user.username }} — Click to Logout"
+                   class="px-3 py-2 rounded-xl text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition flex items-center gap-1.5">
+                    <i class="fa-solid fa-right-from-bracket"></i>
+                    <span>{{ current_user.username }}</span>
+                </a>
+                {% endif %}
             </nav>
         </div>
     </header>

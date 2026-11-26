@@ -19,6 +19,7 @@ class FirestoreStore:
 
     TICKETS_COL = "weighbridge_tickets"
     META_COL = "weighbridge_meta"
+    USERS_COL = "weighbridge_users"
     COUNTER_DOC = "counters"
 
     def __init__(self):
@@ -89,6 +90,86 @@ class FirestoreStore:
         snap = counter_ref.get()
         if not snap.exists:
             counter_ref.set({"last_ticket_no": 1000})
+
+        # Ensure initial admin user exists in Firestore
+        admin_ref = client.collection(self.USERS_COL).document("admin")
+        if not admin_ref.get().exists:
+            try:
+                from cloud_app.auth import hash_password
+            except ImportError:
+                from auth import hash_password
+            init_pw = os.getenv("ADMIN_INITIAL_PASSWORD", "Admin@1234").strip()
+            admin_ref.set({
+                "username": "admin",
+                "full_name": "Administrator",
+                "role": "admin",
+                "password_hash": hash_password(init_pw),
+                "is_active": True,
+                "created_at": datetime.now(timezone.utc),
+            })
+
+    # ---------------- User Management (Firestore) ----------------
+
+    def get_user(self, username: str) -> Optional[Dict[str, Any]]:
+        clean = (username or "").strip().lower()
+        if not clean:
+            return None
+        client = self._get_client()
+        snap = client.collection(self.USERS_COL).document(clean).get()
+        return snap.to_dict() if snap.exists else None
+
+    def list_users(self) -> List[Dict[str, Any]]:
+        client = self._get_client()
+        docs = client.collection(self.USERS_COL).stream()
+        users = [d.to_dict() or {} for d in docs]
+        users.sort(key=lambda u: (0 if u.get("role") == "admin" else 1, u.get("username", "")))
+        return users
+
+    def create_user(self, username: str, full_name: str, role: str, password_hash: str) -> Dict[str, Any]:
+        clean = (username or "").strip().lower()
+        client = self._get_client()
+        ref = client.collection(self.USERS_COL).document(clean)
+        if ref.get().exists:
+            raise ValueError(f"User '{clean}' already exists.")
+        doc = {
+            "username": clean,
+            "full_name": (full_name or clean).strip(),
+            "role": "admin" if role == "admin" else "operator",
+            "password_hash": password_hash,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc),
+        }
+        ref.set(doc)
+        return doc
+
+    def update_user_password(self, username: str, password_hash: str) -> bool:
+        clean = (username or "").strip().lower()
+        client = self._get_client()
+        ref = client.collection(self.USERS_COL).document(clean)
+        if not ref.get().exists:
+            return False
+        ref.set({"password_hash": password_hash}, merge=True)
+        return True
+
+    def toggle_user_active(self, username: str) -> Optional[bool]:
+        clean = (username or "").strip().lower()
+        client = self._get_client()
+        ref = client.collection(self.USERS_COL).document(clean)
+        snap = ref.get()
+        if not snap.exists:
+            return None
+        new_state = not bool((snap.to_dict() or {}).get("is_active", True))
+        ref.set({"is_active": new_state}, merge=True)
+        return new_state
+
+    def delete_user(self, username: str) -> bool:
+        clean = (username or "").strip().lower()
+        client = self._get_client()
+        ref = client.collection(self.USERS_COL).document(clean)
+        if not ref.get().exists:
+            return False
+        ref.delete()
+        return True
 
     def get_next_ticket_number(self) -> int:
         client = self._get_client()

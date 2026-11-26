@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Depends, HTTPException, Query, Response, UploadFile, File, Header
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from urllib.parse import quote
+from fastapi import FastAPI, Request, Depends, HTTPException, Query, Response, UploadFile, File, Header, Form
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -24,8 +25,12 @@ try:
         ADMIN_KEY, IST
     )
     from cloud_app.db import (
-        init_cloud_db, get_cloud_session, CloudTicket,
-        get_next_cloud_ticket_number
+        init_cloud_db, get_cloud_session, CloudTicket, CloudUser,
+        get_next_cloud_ticket_number, seed_initial_admin_sql
+    )
+    from cloud_app.auth import (
+        SESSION_COOKIE_NAME, SESSION_TTL_SECONDS,
+        hash_password, verify_password, create_session_token, verify_session_token
     )
     from cloud_app.firestore_db import firestore_store
     from cloud_app.edge_client import edge_client
@@ -37,8 +42,12 @@ except ImportError:
         ADMIN_KEY, IST
     )
     from db import (
-        init_cloud_db, get_cloud_session, CloudTicket,
-        get_next_cloud_ticket_number
+        init_cloud_db, get_cloud_session, CloudTicket, CloudUser,
+        get_next_cloud_ticket_number, seed_initial_admin_sql
+    )
+    from auth import (
+        SESSION_COOKIE_NAME, SESSION_TTL_SECONDS,
+        hash_password, verify_password, create_session_token, verify_session_token
     )
     from firestore_db import firestore_store
     from edge_client import edge_client
@@ -134,6 +143,7 @@ async def lifespan(app: FastAPI):
             print("[DB] Connected to Google Cloud Firestore")
         else:
             init_cloud_db()
+            seed_initial_admin_sql()
             print("[DB] Connected to SQL database")
     except Exception as e:
         print(f"Error initializing cloud DB: {e}")
@@ -143,6 +153,33 @@ async def lifespan(app: FastAPI):
     guardian_task.cancel()
 
 app = FastAPI(title="Weighbridge Cloud Portal", lifespan=lifespan)
+
+PUBLIC_PATHS = {
+    "/login",
+    "/logout",
+    "/favicon.ico",
+    "/api/tailscale-status",
+    "/api/tailscale-up",
+}
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    user = verify_session_token(token) if token else None
+    request.state.user = user
+
+    if path in PUBLIC_PATHS or path.startswith("/static/"):
+        return await call_next(request)
+
+    if not user:
+        if path.startswith("/api/"):
+            return JSONResponse({"detail": "Authentication required"}, status_code=401)
+        next_target = path + (f"?{request.url.query}" if request.url.query else "")
+        return RedirectResponse(url=f"/login?next={quote(next_target, safe='/')}", status_code=302)
+
+    return await call_next(request)
 
 # Mount static files and templates
 STATIC_DIR = CLOUD_DIR / "static"
@@ -245,6 +282,258 @@ async def do_tailscale_up(
 ):
     return await asyncio.to_thread(run_tailscale_up, authkey, False)
 
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    role: str = "operator"
+    full_name: str = ""
+
+
+class ResetPasswordRequest(BaseModel):
+    password: str
+
+
+def require_admin(request: Request) -> dict:
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, next: str = "/"):
+    if getattr(request.state, "user", None):
+        return RedirectResponse(url="/", status_code=302)
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={
+            "business_name": BUSINESS_NAME,
+            "next_url": next or "/",
+            "error": None,
+        },
+    )
+
+
+@app.post("/login", response_class=HTMLResponse)
+async def login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    next: str = Form("/"),
+    session: Session = Depends(get_cloud_session),
+):
+    uname = username.strip().lower()
+    user_record = None
+    if firestore_store.is_enabled():
+        user_record = await asyncio.to_thread(firestore_store.get_user, uname)
+    else:
+        u = session.exec(select(CloudUser).where(CloudUser.username == uname)).first()
+        if u:
+            user_record = {
+                "username": u.username,
+                "password_hash": u.password_hash,
+                "role": u.role,
+                "full_name": u.full_name,
+                "is_active": u.is_active,
+            }
+
+    if not user_record or not verify_password(password, user_record.get("password_hash", "")):
+        return templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={
+                "business_name": BUSINESS_NAME,
+                "next_url": next or "/",
+                "error": "Invalid username or password / தவறான பயனர் பெயர் அல்லது கடவுச்சொல்",
+            },
+            status_code=401,
+        )
+
+    if not user_record.get("is_active", True):
+        return templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={
+                "business_name": BUSINESS_NAME,
+                "next_url": next or "/",
+                "error": "Account disabled. Contact admin / கணக்கு முடக்கப்பட்டுள்ளது",
+            },
+            status_code=403,
+        )
+
+    token = create_session_token(
+        username=user_record["username"],
+        role=user_record.get("role", "operator"),
+        full_name=user_record.get("full_name", "") or user_record["username"],
+    )
+    safe_next = next if (next and next.startswith("/") and not next.startswith("//")) else "/"
+    resp = RedirectResponse(url=safe_next, status_code=302)
+    resp.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+    return resp
+
+
+@app.api_route("/logout", methods=["GET", "POST"])
+async def logout():
+    resp = RedirectResponse(url="/login", status_code=302)
+    resp.delete_cookie(SESSION_COOKIE_NAME)
+    return resp
+
+
+@app.get("/users", response_class=HTMLResponse)
+async def users_page(request: Request, session: Session = Depends(get_cloud_session)):
+    user = require_admin(request)
+    if firestore_store.is_enabled():
+        users = await asyncio.to_thread(firestore_store.list_users)
+    else:
+        rows = session.exec(select(CloudUser).order_by(CloudUser.username)).all()
+        users = [
+            {
+                "username": r.username,
+                "full_name": r.full_name,
+                "role": r.role,
+                "is_active": r.is_active,
+            }
+            for r in rows
+        ]
+    return templates.TemplateResponse(
+        request=request,
+        name="users.html",
+        context={
+            "active_page": "users",
+            "business_name": BUSINESS_NAME,
+            "business_capacity": BUSINESS_CAPACITY,
+            "business_phone": BUSINESS_PHONE,
+            "current_user": user,
+            "users": users,
+        },
+    )
+
+
+@app.post("/api/users")
+async def api_create_user(
+    req: CreateUserRequest,
+    request: Request,
+    session: Session = Depends(get_cloud_session),
+):
+    require_admin(request)
+    uname = req.username.strip().lower()
+    if len(uname) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+    if len(req.password) < 4:
+        raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+    role = req.role if req.role in ("admin", "operator") else "operator"
+    pw_hash = hash_password(req.password)
+
+    if firestore_store.is_enabled():
+        ok, err = await asyncio.to_thread(
+            firestore_store.create_user, uname, pw_hash, role, req.full_name.strip()
+        )
+        if not ok:
+            raise HTTPException(status_code=400, detail=err or "Could not create user")
+    else:
+        existing = session.exec(select(CloudUser).where(CloudUser.username == uname)).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Username already exists")
+        session.add(CloudUser(
+            username=uname,
+            password_hash=pw_hash,
+            role=role,
+            full_name=req.full_name.strip() or uname,
+            is_active=True,
+        ))
+        session.commit()
+
+    return {"success": True, "username": uname, "role": role}
+
+
+@app.post("/api/users/{username}/password")
+async def api_reset_user_password(
+    username: str,
+    req: ResetPasswordRequest,
+    request: Request,
+    session: Session = Depends(get_cloud_session),
+):
+    require_admin(request)
+    if len(req.password) < 4:
+        raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+    uname = username.strip().lower()
+    pw_hash = hash_password(req.password)
+
+    if firestore_store.is_enabled():
+        ok = await asyncio.to_thread(firestore_store.update_user_password, uname, pw_hash)
+        if not ok:
+            raise HTTPException(status_code=404, detail="User not found")
+    else:
+        u = session.exec(select(CloudUser).where(CloudUser.username == uname)).first()
+        if not u:
+            raise HTTPException(status_code=404, detail="User not found")
+        u.password_hash = pw_hash
+        session.add(u)
+        session.commit()
+
+    return {"success": True}
+
+
+@app.post("/api/users/{username}/toggle")
+async def api_toggle_user(
+    username: str,
+    request: Request,
+    session: Session = Depends(get_cloud_session),
+):
+    admin = require_admin(request)
+    uname = username.strip().lower()
+    if uname == admin.get("username"):
+        raise HTTPException(status_code=400, detail="Cannot disable your own active admin account")
+
+    if firestore_store.is_enabled():
+        new_state = await asyncio.to_thread(firestore_store.toggle_user_active, uname)
+        if new_state is None:
+            raise HTTPException(status_code=404, detail="User not found")
+    else:
+        u = session.exec(select(CloudUser).where(CloudUser.username == uname)).first()
+        if not u:
+            raise HTTPException(status_code=404, detail="User not found")
+        u.is_active = not u.is_active
+        session.add(u)
+        session.commit()
+        new_state = u.is_active
+
+    return {"success": True, "is_active": new_state}
+
+
+@app.delete("/api/users/{username}")
+async def api_delete_user(
+    username: str,
+    request: Request,
+    session: Session = Depends(get_cloud_session),
+):
+    admin = require_admin(request)
+    uname = username.strip().lower()
+    if uname == admin.get("username"):
+        raise HTTPException(status_code=400, detail="Cannot delete your own active admin account")
+
+    if firestore_store.is_enabled():
+        ok = await asyncio.to_thread(firestore_store.delete_user, uname)
+        if not ok:
+            raise HTTPException(status_code=404, detail="User not found")
+    else:
+        u = session.exec(select(CloudUser).where(CloudUser.username == uname)).first()
+        if not u:
+            raise HTTPException(status_code=404, detail="User not found")
+        session.delete(u)
+        session.commit()
+
+    return {"success": True}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index_page(request: Request, session: Session = Depends(get_cloud_session)):
     if firestore_store.is_enabled():
@@ -263,7 +552,8 @@ async def index_page(request: Request, session: Session = Depends(get_cloud_sess
             "next_ticket_no": next_no,
             "materials": DEFAULT_MATERIALS,
             "vehicle_types": DEFAULT_VEHICLE_TYPES,
-            "default_charge": DEFAULT_CHARGE
+            "default_charge": DEFAULT_CHARGE,
+            "current_user": getattr(request.state, "user", None),
         }
     )
 
@@ -282,7 +572,8 @@ async def tickets_page(request: Request, session: Session = Depends(get_cloud_se
             "business_name": BUSINESS_NAME,
             "business_capacity": BUSINESS_CAPACITY,
             "business_phone": BUSINESS_PHONE,
-            "tickets": tickets
+            "tickets": tickets,
+            "current_user": getattr(request.state, "user", None),
         }
     )
 
