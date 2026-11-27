@@ -82,6 +82,8 @@ class FirestoreStore:
             printed=bool(doc_data.get("printed", False)),
             printed_at=doc_data.get("printed_at"),
             remarks=doc_data.get("remarks", ""),
+            front_img=doc_data.get("front_img"),
+            rear_img=doc_data.get("rear_img"),
         )
 
     def init_db(self):

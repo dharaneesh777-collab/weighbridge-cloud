@@ -45,6 +45,8 @@ class CloudTicket(SQLModel, table=True):
     printed: bool = Field(default=False)
     printed_at: Optional[datetime] = None
     remarks: Optional[str] = Field(default="")
+    front_img: Optional[str] = Field(default=None)
+    rear_img: Optional[str] = Field(default=None)
 
 class CloudUser(SQLModel, table=True):
     __tablename__ = "cloud_users"
@@ -73,7 +75,9 @@ def init_cloud_db():
                 "second_weight_at": "TIMESTAMP",
                 "printed": "BOOLEAN DEFAULT FALSE",
                 "printed_at": "TIMESTAMP",
-                "remarks": "VARCHAR DEFAULT ''"
+                "remarks": "VARCHAR DEFAULT ''",
+                "front_img": "TEXT",
+                "rear_img": "TEXT"
             }
             with engine.begin() as conn:
                 for col_name, col_def in migrations.items():

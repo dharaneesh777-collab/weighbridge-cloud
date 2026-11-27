@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import asyncio
 import subprocess
@@ -577,6 +578,97 @@ async def tickets_page(request: Request, session: Session = Depends(get_cloud_se
         }
     )
 
+_LOGO_DATA_URI: Optional[str] = None
+
+
+def _get_logo_data_uri() -> str:
+    global _LOGO_DATA_URI
+    if _LOGO_DATA_URI is not None:
+        return _LOGO_DATA_URI
+    logo_path = CLOUD_DIR / "static" / "img" / "murugan_logo.png"
+    try:
+        if logo_path.exists():
+            b64 = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+            _LOGO_DATA_URI = f"data:image/png;base64,{b64}"
+            return _LOGO_DATA_URI
+    except Exception:
+        pass
+    _LOGO_DATA_URI = "/static/img/murugan_logo.png"
+    return _LOGO_DATA_URI
+
+
+def _compress_snapshot_b64(img_bytes: Optional[bytes]) -> Optional[str]:
+    if not img_bytes:
+        return None
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        if im.width > 640:
+            new_h = max(1, int(im.height * (640 / im.width)))
+            im = im.resize((640, new_h), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=72, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{b64}"
+    except Exception:
+        b64 = base64.b64encode(img_bytes).decode("ascii")
+        return f"data:image/jpeg;base64,{b64}"
+
+
+def _build_slip_context(ticket: CloudTicket, auto_print: bool = False) -> dict:
+    ref_dt = ticket.second_weight_at or ticket.created_at
+    slip_date = format_ist(ref_dt, "%d-%m-%Y")
+    slip_time = format_ist(ref_dt, "%H:%M:%S")
+
+    is_first_weight = (ticket.status == "FIRST_WEIGHT")
+    is_double = is_first_weight or (ticket.first_weight is not None) or (ticket.first_weight_at is not None)
+
+    load_raw = (ticket.load_status or "Loaded / லோடு").lower()
+    if "empty" in load_raw or "காலி" in load_raw:
+        first_load_en, first_load_ta = "Empty", "காலி"
+        second_load_en, second_load_ta = "Loaded", "லோடு"
+    else:
+        first_load_en, first_load_ta = "Loaded", "லோடு"
+        second_load_en, second_load_ta = "Empty", "காலி"
+
+    first_wt = ticket.first_weight or (ticket.tare_weight if first_load_en == "Empty" else ticket.gross_weight) or 0.0
+    if first_load_en == "Empty":
+        second_wt = ticket.gross_weight or 0.0
+    else:
+        second_wt = ticket.tare_weight or 0.0
+
+    first_dt = format_ist(ticket.first_weight_at or ticket.created_at, "%d-%m-%Y %H:%M")
+    second_dt = format_ist(ticket.second_weight_at or ticket.created_at, "%d-%m-%Y %H:%M")
+    gross_dt = format_ist(ticket.second_weight_at or ticket.created_at, "%d-%m-%Y %H:%M")
+    tare_dt = format_ist(ticket.first_weight_at or ticket.created_at, "%d-%m-%Y %H:%M")
+
+    return {
+        "ticket": ticket,
+        "business_name": BUSINESS_NAME,
+        "business_capacity": BUSINESS_CAPACITY,
+        "business_address": BUSINESS_ADDRESS,
+        "business_phone": BUSINESS_PHONE,
+        "auto_print": auto_print,
+        "logo_src": _get_logo_data_uri(),
+        "slip_date": slip_date,
+        "slip_time": slip_time,
+        "is_first_weight": is_first_weight,
+        "is_double": is_double,
+        "first_load_en": first_load_en,
+        "first_load_ta": first_load_ta,
+        "second_load_en": second_load_en,
+        "second_load_ta": second_load_ta,
+        "first_wt": first_wt,
+        "second_wt": second_wt,
+        "first_dt": first_dt,
+        "second_dt": second_dt,
+        "gross_dt": gross_dt,
+        "tare_dt": tare_dt,
+        "front_img": getattr(ticket, "front_img", None),
+        "rear_img": getattr(ticket, "rear_img", None),
+    }
+
+
 @app.get("/slip/{ticket_id}", response_class=HTMLResponse)
 async def view_slip(request: Request, ticket_id: int, auto_print: int = 0, session: Session = Depends(get_cloud_session)):
     if firestore_store.is_enabled():
@@ -588,14 +680,7 @@ async def view_slip(request: Request, ticket_id: int, auto_print: int = 0, sessi
     return templates.TemplateResponse(
         request=request,
         name="slip.html",
-        context={
-            "ticket": ticket,
-            "business_name": BUSINESS_NAME,
-            "business_capacity": BUSINESS_CAPACITY,
-            "business_address": BUSINESS_ADDRESS,
-            "business_phone": BUSINESS_PHONE,
-            "auto_print": (auto_print == 1)
-        }
+        context=_build_slip_context(ticket, auto_print=(auto_print == 1)),
     )
 
 # ---------------- API Routes ----------------
@@ -833,25 +918,38 @@ async def api_ticket_save_and_print(
     is_stage_first = (req.stage == "FIRST_WEIGHT")
     now_utc = datetime.now(timezone.utc)
 
+    # Capture front & rear camera snapshots in parallel (compressed JPEG data URIs)
+    front_bytes, rear_bytes = await asyncio.gather(
+        edge_client.get_camera_snapshot(camera="front", allow_placeholder=False, force_refresh=False),
+        edge_client.get_camera_snapshot(camera="rear", allow_placeholder=False, force_refresh=False),
+    )
+    front_b64 = _compress_snapshot_b64(front_bytes)
+    rear_b64 = _compress_snapshot_b64(rear_bytes)
+
     if firestore_store.is_enabled():
         existing_open = await asyncio.to_thread(firestore_store.find_open_first_weight, clean_v)
         if existing_open and not is_stage_first:
+            update_fields = {
+                "customer_name": req.customer_name.strip(),
+                "mobile": req.mobile.strip(),
+                "vehicle_type": req.vehicle_type,
+                "load_status": req.load_status,
+                "material": req.material.strip(),
+                "gross_weight": req.gross_weight,
+                "tare_weight": req.tare_weight,
+                "net_weight": req.net_weight,
+                "charge": req.charge,
+                "status": "COMPLETED",
+                "second_weight_at": now_utc,
+            }
+            if front_b64:
+                update_fields["front_img"] = front_b64
+            if rear_b64:
+                update_fields["rear_img"] = rear_b64
             ticket = await asyncio.to_thread(
                 firestore_store.update_ticket,
                 existing_open.ticket_no,
-                {
-                    "customer_name": req.customer_name.strip(),
-                    "mobile": req.mobile.strip(),
-                    "vehicle_type": req.vehicle_type,
-                    "load_status": req.load_status,
-                    "material": req.material.strip(),
-                    "gross_weight": req.gross_weight,
-                    "tare_weight": req.tare_weight,
-                    "net_weight": req.net_weight,
-                    "charge": req.charge,
-                    "status": "COMPLETED",
-                    "second_weight_at": now_utc,
-                }
+                update_fields,
             )
         else:
             ticket = await asyncio.to_thread(
@@ -875,6 +973,8 @@ async def api_ticket_save_and_print(
                     "printed": False,
                     "printed_at": None,
                     "remarks": "",
+                    "front_img": front_b64,
+                    "rear_img": rear_b64,
                 }
             )
     else:
@@ -898,6 +998,10 @@ async def api_ticket_save_and_print(
             ticket.charge = req.charge
             ticket.status = "COMPLETED"
             ticket.second_weight_at = now_utc
+            if front_b64:
+                ticket.front_img = front_b64
+            if rear_b64:
+                ticket.rear_img = rear_b64
             session.commit()
             session.refresh(ticket)
         else:
@@ -919,7 +1023,9 @@ async def api_ticket_save_and_print(
                     charge=req.charge,
                     status="FIRST_WEIGHT" if is_stage_first else "COMPLETED",
                     first_weight_at=now_utc if is_stage_first else None,
-                    second_weight_at=now_utc if not is_stage_first else None
+                    second_weight_at=now_utc if not is_stage_first else None,
+                    front_img=front_b64,
+                    rear_img=rear_b64,
                 )
                 session.add(candidate)
                 try:
@@ -933,14 +1039,9 @@ async def api_ticket_save_and_print(
                 raise HTTPException(status_code=409, detail="Concurrent ticket number conflict; please retry.")
 
     # 2. Render slip HTML
-    slip_html = templates.get_template("slip.html").render({
-        "ticket": ticket,
-        "business_name": BUSINESS_NAME,
-        "business_capacity": BUSINESS_CAPACITY,
-        "business_address": BUSINESS_ADDRESS,
-        "business_phone": BUSINESS_PHONE,
-        "auto_print": False
-    })
+    slip_html = templates.get_template("slip.html").render(
+        _build_slip_context(ticket, auto_print=False)
+    )
 
     # 3. Dispatch print job to Home PC edge
     print_res = await edge_client.print_slip(
@@ -984,14 +1085,9 @@ async def api_ticket_reprint(ticket_no: int, session: Session = Depends(get_clou
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
-    slip_html = templates.get_template("slip.html").render({
-        "ticket": ticket,
-        "business_name": BUSINESS_NAME,
-        "business_capacity": BUSINESS_CAPACITY,
-        "business_address": BUSINESS_ADDRESS,
-        "business_phone": BUSINESS_PHONE,
-        "auto_print": False
-    })
+    slip_html = templates.get_template("slip.html").render(
+        _build_slip_context(ticket, auto_print=False)
+    )
 
     print_res = await edge_client.print_slip(
         ticket_no=ticket.ticket_no,

@@ -1,190 +1,635 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>Weighment Slip #{{ ticket.ticket_no }}</title>
-    <style>
-        @page {
-            size: A5 landscape;
-            margin: 6mm;
-        }
-        * {
-            box-sizing: border-box;
-            font-family: Arial, Helvetica, sans-serif;
-            color: #000;
-        }
-        body {
-            margin: 0;
-            padding: 4mm;
-            background: #fff;
-            font-size: 11pt;
-        }
-        .slip-box {
-            border: 2px solid #000;
-            padding: 8px 12px;
-            width: 100%;
-            max-width: 200mm;
-            margin: 0 auto;
-        }
-        .header {
-            text-align: center;
-            border-bottom: 2px solid #000;
-            padding-bottom: 4px;
-            margin-bottom: 6px;
-        }
-        .header h1 {
-            margin: 0;
-            font-size: 16pt;
-            font-weight: bold;
-            letter-spacing: 0.5px;
-        }
-        .header .sub {
-            font-size: 8.5pt;
-            margin-top: 2px;
-            font-weight: bold;
-        }
-        .info-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 4px 16px;
-            font-size: 9.5pt;
-            margin-bottom: 6px;
-        }
-        .info-row {
-            display: flex;
-            justify-content: space-between;
-        }
-        .info-label {
-            font-weight: bold;
-        }
-        .weight-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 8px 0;
-        }
-        .weight-table th, .weight-table td {
-            border: 1.5px solid #000;
-            padding: 6px 10px;
-            text-align: center;
-        }
-        .weight-table th {
-            background-color: #f0f0f0;
-            font-size: 10pt;
-            font-weight: bold;
-        }
-        .weight-val {
-            font-size: 13pt;
-            font-weight: bold;
-            font-family: monospace;
-        }
-        .net-val {
-            font-size: 15pt;
-            font-weight: bold;
-            background-color: #f8f8f8;
-        }
-        .footer-grid {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-end;
-            margin-top: 18px;
-            font-size: 9pt;
-        }
-        .sign-box {
-            border-top: 1px solid #000;
-            padding-top: 2px;
-            width: 140px;
-            text-align: center;
-            font-weight: bold;
-        }
-        @media print {
-            body { padding: 0; }
-        }
-    </style>
+  <meta charset="UTF-8">
+  <title>Weighbridge Ticket #{{ ticket.ticket_no }}{% if is_first_weight %} - FIRST WEIGHMENT RECEIPT{% endif %}</title>
+  <meta name="document-type" content="{% if is_first_weight %}FIRST WEIGHMENT RECEIPT{% else %}WEIGHMENT SLIP{% endif %}">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Inter:wght@400;600;700;800;900&display=swap');
+
+    @page {
+      size: A5 landscape;
+      margin: 3mm 4mm;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Tamil", sans-serif;
+      color: #000;
+      background: #f8fafc;
+      padding: 8px;
+      font-size: 9.5pt;
+    }
+
+    @media print {
+      @page {
+        size: A5 landscape;
+        margin: 3mm 4mm;
+      }
+      *, *::before, *::after {
+        box-sizing: border-box !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+        page-break-after: avoid !important;
+        break-after: avoid !important;
+      }
+      html, body {
+        width: 100% !important;
+        height: 100% !important;
+        max-height: 142mm !important;
+        background: #fff !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        overflow: hidden !important;
+      }
+      .no-print {
+        display: none !important;
+      }
+      .photo-label {
+        display: none !important;
+      }
+      .slip-card {
+        border: none !important;
+        box-shadow: none !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        max-height: 141mm !important;
+        padding: 1.5mm 3.5mm !important;
+        margin: 0 !important;
+        overflow: hidden !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+        page-break-after: avoid !important;
+        break-after: avoid !important;
+      }
+      .photo-box {
+        border-radius: 0 !important;
+      }
+    }
+
+    .slip-card {
+      max-width: 198mm;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid #cbd5e1;
+      padding: 2mm 4.5mm;
+      position: relative;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+
+    .slip-header-wrapper {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.8mm;
+    }
+    .murugan-logo {
+      width: 62px;
+      height: 62px;
+      object-fit: contain;
+      flex-shrink: 0;
+    }
+    .slip-header {
+      flex: 1;
+      text-align: center;
+      padding: 0 8px;
+    }
+    .biz-title {
+      font-size: 21.5pt;
+      font-weight: 900;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: #1e3a8a;
+      line-height: 1.12;
+    }
+    .capacity-line {
+      font-size: 13.5pt;
+      font-weight: 900;
+      color: #dc2626;
+      margin-top: 1.5px;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+    }
+    .address-line {
+      font-size: 8pt;
+      font-weight: 600;
+      color: #334155;
+      margin-top: 1.5px;
+      line-height: 1.25;
+    }
+    .header-divider {
+      border-bottom: 2px solid #1e3a8a;
+      margin: 1mm 0 0.8mm 0;
+    }
+
+    .info-table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1.5px solid #1e3a8a;
+      margin-bottom: 1.2mm;
+      font-size: 9pt;
+      font-weight: 700;
+    }
+    .info-table td {
+      border: 1px solid #cbd5e1;
+      padding: 0.8mm 2.5mm;
+      background-color: #f8fafc;
+    }
+    .serial-no-badge {
+      font-family: monospace;
+      font-size: 11pt;
+      font-weight: 900;
+      color: #ffffff;
+      background: #1e3a8a;
+      padding: 1px 7px;
+      border-radius: 3px;
+      letter-spacing: 0.5px;
+    }
+    .info-val-badge {
+      font-weight: 800;
+      color: #0f172a;
+    }
+
+    .photo-row {
+      display: flex;
+      gap: 3mm;
+      margin-bottom: 1.2mm;
+    }
+    .photo-box {
+      flex: 1;
+      height: 56mm;
+      background: #0f172a;
+      border: 1.5px solid #1e3a8a;
+      border-radius: 3px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      contain: paint;
+    }
+    .photo-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .photo-label {
+      position: absolute;
+      top: 3px;
+      left: 4px;
+      background: rgba(15, 23, 42, 0.88);
+      color: #38bdf8;
+      font-size: 7.5pt;
+      font-weight: 800;
+      padding: 2px 7px;
+      border-radius: 3px;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      letter-spacing: 0.3px;
+    }
+    .photo-fallback {
+      color: #f87171;
+      font-size: 8.5pt;
+      font-weight: 700;
+      text-align: center;
+      padding: 10px;
+    }
+
+    .lower-section {
+      display: flex;
+      gap: 3mm;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .details-block {
+      flex: 1.05;
+    }
+    .details-table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1.5px solid #1e3a8a;
+      font-size: 8.8pt;
+    }
+    .details-table td {
+      border: 1px solid #cbd5e1;
+      padding: 0.8mm 2.2mm;
+      vertical-align: middle;
+    }
+    .detail-label {
+      font-weight: 700;
+      color: #1e293b;
+      width: 40%;
+      background: #f8fafc;
+    }
+    .detail-value {
+      font-weight: 800;
+      color: #0f172a;
+    }
+    .veh-badge {
+      display: inline-block;
+      background: #eff6ff;
+      color: #1e3a8a;
+      font-size: 13pt;
+      font-weight: 900;
+      letter-spacing: 0.8px;
+      padding: 1px 8px;
+      border: 1.5px solid #93c5fd;
+      border-radius: 4px;
+    }
+    .charge-badge {
+      display: inline-block;
+      background: #ecfdf5;
+      color: #047857;
+      font-size: 11pt;
+      font-weight: 900;
+      padding: 1px 8px;
+      border-radius: 4px;
+      border: 1px solid #a7f3d0;
+    }
+
+    .weights-block {
+      flex: 0.95;
+    }
+    .weights-table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1.5px solid #1e3a8a;
+      font-size: 8.8pt;
+      height: 100%;
+    }
+    .weights-table td {
+      border: 1px solid #cbd5e1;
+      padding: 0.8mm 2.2mm;
+      vertical-align: middle;
+    }
+    .weight-label-td {
+      font-weight: 700;
+      color: #1e293b;
+      background: #f8fafc;
+      width: 50%;
+    }
+    .tamil-label {
+      font-size: 8pt;
+      color: #475569;
+      font-weight: 600;
+    }
+    .cond-badge {
+      display: inline-block;
+      font-size: 7.2pt;
+      font-weight: 900;
+      padding: 0.5px 5px;
+      border-radius: 3px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      vertical-align: middle;
+      line-height: 1.2;
+    }
+    .cond-badge-loaded {
+      background: #ecfdf5;
+      color: #065f46;
+      border: 1px solid #a7f3d0;
+    }
+    .cond-badge-empty {
+      background: #f1f5f9;
+      color: #334155;
+      border: 1px solid #cbd5e1;
+    }
+    .weight-val-td {
+      text-align: right;
+    }
+    .weight-val {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 13.5pt;
+      font-weight: 900;
+      color: #dc2626;
+    }
+    .weight-unit {
+      font-size: 10.5pt;
+      font-family: sans-serif;
+      font-weight: 800;
+      color: #dc2626;
+      margin-left: 2px;
+    }
+    .weight-meta {
+      font-size: 7.2pt;
+      color: #64748b;
+      font-family: sans-serif;
+    }
+
+    .net-weight-row {
+      background: #fef2f2;
+      border-top: 1.5px solid #b91c1c !important;
+    }
+    .net-label-td {
+      background: #fee2e2 !important;
+    }
+    .net-label-en {
+      font-size: 10pt;
+      font-weight: 900;
+      color: #991b1b;
+      letter-spacing: 0.5px;
+    }
+    .net-label-ta {
+      font-size: 8pt;
+      font-weight: 800;
+      color: #b91c1c;
+    }
+    .weight-net {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 16.5pt;
+      font-weight: 900;
+      color: #dc2626;
+    }
+    .net-unit {
+      font-size: 11.5pt;
+      font-family: sans-serif;
+      font-weight: 800;
+      color: #dc2626;
+      margin-left: 2px;
+    }
+
+    .slip-ending-message {
+      margin-top: 1mm;
+      padding: 0.5mm 2mm;
+      background: #f8fafc;
+      border: 1px solid #1e3a8a;
+      border-radius: 3px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 18px;
+      page-break-inside: avoid;
+      break-inside: avoid;
+      line-height: 1.15;
+    }
+    .gov-recognized {
+      font-size: 8pt;
+      font-weight: 800;
+      color: #1e3a8a;
+      letter-spacing: 0.25px;
+    }
+    .footer-divider-dot {
+      color: #94a3b8;
+      font-weight: 900;
+      font-size: 8pt;
+    }
+    .thank-you-msg {
+      font-size: 8.5pt;
+      font-weight: 900;
+      color: #047857;
+      letter-spacing: 0.3px;
+    }
+
+    .action-bar {
+      max-width: 200mm;
+      margin: 10px auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .btn {
+      padding: 8px 16px;
+      font-weight: 700;
+      font-size: 10pt;
+      border-radius: 6px;
+      cursor: pointer;
+      border: none;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn-print {
+      background: #1e3a8a;
+      color: #fff;
+    }
+    .btn-epson {
+      background: #047857;
+      color: #fff;
+    }
+    .btn-back {
+      background: #e2e8f0;
+      color: #1e293b;
+    }
+  </style>
 </head>
 <body>
-    <div class="slip-box">
-        <div class="header">
-            <h1>{{ business_name }}</h1>
-            <div class="sub">{{ business_capacity }} &bull; {{ business_address }} &bull; Ph: {{ business_phone }}</div>
-        </div>
 
-        <div class="info-grid">
-            <div class="info-row">
-                <span class="info-label">TICKET NO:</span>
-                <span style="font-weight: bold; font-size: 11pt;">#{{ ticket.ticket_no }}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">DATE & TIME:</span>
-                <span>{{ (ticket.second_weight_at or ticket.created_at) | ist('%d-%m-%Y %H:%M:%S') }}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">VEHICLE NO:</span>
-                <span style="font-weight: bold; font-size: 12pt; font-family: monospace;">{{ ticket.vehicle_no }}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">CHARGES:</span>
-                <span style="font-weight: bold;">₹ {{ "{:,.2f}".format(ticket.charge) }}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">CUSTOMER / PARTY:</span>
-                <span>{{ ticket.customer_name or 'STANDARD WEIGHMENT' }}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">MATERIAL:</span>
-                <span>{{ ticket.material or 'GENERAL' }}</span>
-            </div>
-        </div>
+  <div class="action-bar no-print">
+    <a href="/" class="btn btn-back">
+      <span>⬅️ Back to Weigh</span>
+    </a>
+    <div style="font-weight: bold; font-size: 11pt; color: #1e3a8a;">
+      {% if is_first_weight %}FIRST WEIGHMENT RECEIPT Preview (A5 Landscape){% else %}Weighbridge Slip Preview (A5 Landscape){% endif %}
+    </div>
+    <div style="display: flex; gap: 8px;">
+      <a href="/tickets" class="btn btn-back">Tickets List</a>
+      <button onclick="printToEpson(this)" class="btn btn-epson">
+        <span>🖨️ Print to Epson</span>
+      </button>
+      <button onclick="window.print()" class="btn btn-print">
+        <span>🖨️ Browser Print</span>
+      </button>
+    </div>
+  </div>
 
-        {% if ticket.status == 'FIRST_WEIGHT' %}
-        <div style="text-align: center; margin: 4px 0; font-weight: bold; background: #fff3cd; border: 1px solid #ffeeba; padding: 4px; font-size: 11pt;">
-            *** 1st WEIGHT SLIP / முதல் எடை இரசீது ***
-        </div>
-        <table class="weight-table">
-            <thead>
-                <tr>
-                    <th style="width: 50%;">1st WEIGHT (KG)</th>
-                    <th style="width: 50%;">LOAD STATUS</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td class="weight-val net-val">{{ "{:,.0f}".format(ticket.first_weight or ticket.gross_weight or ticket.tare_weight) }}</td>
-                    <td class="weight-val">{{ ticket.load_status or 'Loaded' }}</td>
-                </tr>
-            </tbody>
-        </table>
+  <div class="slip-card">
+    <!-- 1. Header Centred with Lord Murugan Logo -->
+    <div class="slip-header-wrapper">
+      <img src="{{ logo_src }}" alt="Lord Murugan" class="murugan-logo">
+      <div class="slip-header">
+        <div class="biz-title">{{ business_name }}</div>
+        <div class="capacity-line">{{ business_capacity }}</div>
+        <div class="address-line">{{ business_address }}{% if business_phone %} &bull; <span style="font-weight: 800; color: #1e3a8a;">Ph : {{ business_phone }}</span>{% endif %}</div>
+      </div>
+      <img src="{{ logo_src }}" alt="Lord Murugan" class="murugan-logo">
+    </div>
+    <div class="header-divider"></div>
+
+    <!-- 2. Info Row -->
+    <table class="info-table">
+      <tr>
+        <td style="width: 36%;">Serial No / எண்: <span class="serial-no-badge">#{{ ticket.ticket_no }}</span></td>
+        <td style="width: 34%;">Date / தேதி: <span class="info-val-badge">{{ slip_date }}</span></td>
+        <td style="width: 30%;">Time / நேரம்: <span class="info-val-badge">{{ slip_time }}</span></td>
+      </tr>
+    </table>
+
+    <!-- 3. Photo Row: Front & Rear Camera Snapshots -->
+    <div class="photo-row">
+      <div class="photo-box">
+        <span class="photo-label">FRONT VIEW</span>
+        {% if front_img %}
+          <img src="{{ front_img }}" alt="Front View Photo"
+               onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+          <div class="photo-fallback" style="display: none;">Camera unavailable</div>
         {% else %}
-        <table class="weight-table">
-            <thead>
-                <tr>
-                    <th style="width: 33%;">GROSS WEIGHT (KG)</th>
-                    <th style="width: 33%;">TARE WEIGHT (KG)</th>
-                    <th style="width: 34%;">NET WEIGHT (KG)</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td class="weight-val">{{ "{:,.0f}".format(ticket.gross_weight) }}</td>
-                    <td class="weight-val">{{ "{:,.0f}".format(ticket.tare_weight) }}</td>
-                    <td class="weight-val net-val">{{ "{:,.0f}".format(ticket.net_weight) }}</td>
-                </tr>
-            </tbody>
-        </table>
+          <div class="photo-fallback">Camera unavailable</div>
         {% endif %}
-
-        <div class="footer-grid">
-            <div class="sign-box">Driver Signature</div>
-            <div style="font-size: 8pt; color: #555;">Printed via Cloud System &bull; Epson L3350</div>
-            <div class="sign-box">Weighbridge Operator</div>
-        </div>
+      </div>
+      <div class="photo-box">
+        <span class="photo-label">REAR VIEW</span>
+        {% if rear_img %}
+          <img src="{{ rear_img }}" alt="Rear View Photo"
+               onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+          <div class="photo-fallback" style="display: none;">Camera unavailable</div>
+        {% else %}
+          <div class="photo-fallback">Camera unavailable</div>
+        {% endif %}
+      </div>
     </div>
 
+    <!-- 4 & 5. Lower Section: Details (Left) + Weights (Right) -->
+    <div class="lower-section">
+      <div class="details-block">
+        <table class="details-table">
+          <tr>
+            <td class="detail-label">Vehicle No / வண்டி எண்:</td>
+            <td class="detail-value"><span class="veh-badge">{{ ticket.vehicle_no }}</span></td>
+          </tr>
+          {% if ticket.customer_name and ticket.customer_name != "Direct Customer / Cash" %}
+          <tr>
+            <td class="detail-label">Customer / வாடிக்கையாளர்:</td>
+            <td class="detail-value" style="font-weight: 700;">{{ ticket.customer_name }}</td>
+          </tr>
+          {% endif %}
+          <tr>
+            <td class="detail-label">Vehicle Type / வாகனம்:</td>
+            <td class="detail-value" style="font-weight: 700;">{{ ticket.vehicle_type or '🚚 Lorry / லாரி' }}</td>
+          </tr>
+          <tr>
+            <td class="detail-label">Material / சரக்கு:</td>
+            <td class="detail-value" style="font-weight: 700;">{{ ticket.material or 'General Cargo / பொதுச் சரக்கு' }}</td>
+          </tr>
+          <tr>
+            <td class="detail-label">Charge / கட்டணம்:</td>
+            <td class="detail-value"><span class="charge-badge">₹ {{ "{:,.2f}".format(ticket.charge) }}</span></td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="weights-block">
+        <table class="weights-table">
+          {% if is_double %}
+          <tr>
+            <td class="weight-label-td">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px;">
+                <span>1st Weight</span>
+                <span class="cond-badge cond-badge-{{ first_load_en | lower }}">{{ first_load_en }}</span>
+              </div>
+              <div class="tamil-label">முதல் எடை ({{ first_load_ta }})</div>
+            </td>
+            <td class="weight-val-td">
+              <div class="weight-val">{{ "{:,.0f}".format(first_wt) }} <span class="weight-unit">Kg</span></div>
+              <div class="weight-meta">{{ first_dt }}</div>
+            </td>
+          </tr>
+          <tr>
+            <td class="weight-label-td">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px;">
+                <span>2nd Weight</span>
+                <span class="cond-badge cond-badge-{{ second_load_en | lower }}">{{ second_load_en }}</span>
+              </div>
+              <div class="tamil-label">இரண்டாம் எடை ({{ second_load_ta }})</div>
+            </td>
+            <td class="weight-val-td">
+              <div class="weight-val"{% if is_first_weight %} style="color: #94a3b8;"{% endif %}>
+                {% if is_first_weight %}-{% else %}{{ "{:,.0f}".format(second_wt) }} <span class="weight-unit">Kg</span>{% endif %}
+              </div>
+              <div class="weight-meta">
+                {% if is_first_weight %}&nbsp;{% else %}{{ second_dt }}{% endif %}
+              </div>
+            </td>
+          </tr>
+          <tr class="net-weight-row">
+            <td class="weight-label-td net-label-td">
+              <div class="net-label-en">NET WEIGHT</div>
+              <div class="net-label-ta">சரக்கு எடை</div>
+            </td>
+            <td class="weight-val-td net-val-td">
+              <div class="weight-net">
+                {% if is_first_weight or ticket.net_weight <= 0 %}-{% else %}{{ "{:,.0f}".format(ticket.net_weight) }} <span class="net-unit">Kg</span>{% endif %}
+              </div>
+            </td>
+          </tr>
+          {% else %}
+          <tr>
+            <td class="weight-label-td">
+              <div>Gross Weight</div>
+              <div class="tamil-label">மொத்த எடை</div>
+            </td>
+            <td class="weight-val-td">
+              <div class="weight-val">{{ "{:,.0f}".format(ticket.gross_weight) }} <span class="weight-unit">Kg</span></div>
+              <div class="weight-meta">{{ gross_dt }}</div>
+            </td>
+          </tr>
+          <tr>
+            <td class="weight-label-td">
+              <div>Tare Weight</div>
+              <div class="tamil-label">காலி எடை</div>
+            </td>
+            <td class="weight-val-td">
+              <div class="weight-val">{% if ticket.tare_weight > 0 %}{{ "{:,.0f}".format(ticket.tare_weight) }} <span class="weight-unit">Kg</span>{% else %}-{% endif %}</div>
+              <div class="weight-meta">{% if ticket.tare_weight > 0 %}{{ tare_dt }}{% else %}&nbsp;{% endif %}</div>
+            </td>
+          </tr>
+          <tr class="net-weight-row">
+            <td class="weight-label-td net-label-td">
+              <div class="net-label-en">NET WEIGHT</div>
+              <div class="net-label-ta">சரக்கு எடை</div>
+            </td>
+            <td class="weight-val-td net-val-td">
+              <div class="weight-net">{% if ticket.net_weight > 0 %}{{ "{:,.0f}".format(ticket.net_weight) }} <span class="net-unit">Kg</span>{% else %}-{% endif %}</div>
+            </td>
+          </tr>
+          {% endif %}
+        </table>
+      </div>
+    </div>
+
+    <div class="slip-ending-message">
+      <div class="gov-recognized">அரசால் அங்கீகரிக்கப்பட்டது</div>
+      <div class="footer-divider-dot">|</div>
+      <div class="thank-you-msg">நன்றி மீண்டும் வருக</div>
+    </div>
+  </div>
+
+  <script>
+    async function printToEpson(btn) {
+      const orig = btn.innerHTML;
+      btn.innerHTML = '<span>⏳ Sending...</span>';
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/ticket/reprint?ticket_no={{ ticket.ticket_no }}', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          btn.innerHTML = '<span>✓ Sent to Epson!</span>';
+        } else {
+          btn.innerHTML = '<span>❌ Failed</span>';
+          alert(data.message || data.detail || 'Could not reach Home PC printer.');
+        }
+      } catch (e) {
+        btn.innerHTML = '<span>❌ Error</span>';
+      }
+      setTimeout(() => {
+        btn.innerHTML = orig;
+        btn.disabled = false;
+      }, 2500);
+    }
+
     {% if auto_print %}
-    <script>
-        window.addEventListener('DOMContentLoaded', () => {
-            window.print();
-        });
-    </script>
+    window.addEventListener('DOMContentLoaded', () => {
+      window.print();
+    });
     {% endif %}
+  </script>
 </body>
 </html>
