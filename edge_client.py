@@ -194,8 +194,10 @@ class EdgeClient:
                     return entry["bytes"]
 
             # 2. Query Home PC camera test endpoint (returns high-res JPEG base64)
+            # Note: Home PC camera 1/2 are physically swapped relative to Front/Rear labels
+            edge_cam = "rear" if cam_type == "front" else "front"
             cam_err_reason = "STANDBY"
-            url = f"{EDGE_URL}/api/camera/test?type={cam_type}"
+            url = f"{EDGE_URL}/api/camera/test?type={edge_cam}"
             try:
                 res = await self._camera_client.get(url, headers=self._headers(), timeout=7.0)
                 if res.status_code == 200:
@@ -217,7 +219,7 @@ class EdgeClient:
             # 3. Fallback: Edge snapshot endpoint (skip if camera/test already reported definitive LAN failure)
             if cam_err_reason == "STANDBY":
                 try:
-                    edge_url = f"{EDGE_URL}/api/edge/camera/snapshot?camera={cam_type}"
+                    edge_url = f"{EDGE_URL}/api/edge/camera/snapshot?camera={edge_cam}"
                     res = await self._camera_client.get(edge_url, headers=self._headers(), timeout=5.0)
                     if res.status_code == 200 and res.headers.get("content-type", "").startswith("image/"):
                         img_bytes = res.content
